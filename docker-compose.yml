@@ -8,6 +8,7 @@ services:
     environment:
       MODE: ${MODE:-serve}
       LISTEN_ADDR: ":8080"
+      FFPROBE_PATH: "/usr/local/bin/ffprobe"
       INVALID_PATH: "/var/lib/arr-guard/invalid.json"
       STATE_PATH: "/var/lib/arr-guard/state.json"
       PATH_MAPPINGS_JSON: '[{"from":"/media","to":"/media"}]'

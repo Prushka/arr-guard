@@ -5,26 +5,19 @@ services:
     restart: unless-stopped
     environment:
       MODE: "serve"
-      LISTEN_ADDR: ":8080"
+      LISTEN_ADDR: ":9292"
+      FFPROBE_PATH: "/usr/local/bin/ffprobe"
       SONARR_URL: "http://sonarr:8989"
       SONARR_API_KEY: "replace-me"
       RADARR_URL: "http://radarr:7878"
       RADARR_API_KEY: "replace-me"
-      WEBHOOK_TOKEN: "replace-with-a-long-random-token"
-      WEBHOOK_USERNAME: ""
-      WEBHOOK_PASSWORD: ""
       DRY_RUN: "false"
       INVALID_PATH: "/var/lib/arr-guard/invalid.json"
-      PATH_MAPPINGS_JSON: '[{"from":"/tv","to":"/media/tv"},{"from":"/movies","to":"/media/movies"}]'
       STATE_PATH: "/var/lib/arr-guard/state.json"
       MAX_ATTEMPTS: "3"
       WORKERS: "2"
     ports:
-      - "8080:8080"
+      - "9292:9292"
     volumes:
-      - /srv/media/tv:/media/tv:ro
-      - /srv/media/movies:/media/movies:ro
-      - arr-guard-state:/var/lib/arr-guard
-
-volumes:
-  arr-guard-state:
+      - /srv/media:/media:ro
+      - /srv/arr-guard:/var/lib/arr-guard

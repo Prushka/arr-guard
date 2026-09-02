@@ -54,6 +54,9 @@ docker compose up -d
 
 The Compose files always use `meinya/arr-guard:latest` from Docker Hub; the
 image name and tag are not configurable through Compose environment variables.
+The image includes the static `ffprobe` binary from
+`mwader/static-ffmpeg:7.1.1` and Compose selects it at
+`/usr/local/bin/ffprobe`.
 To publish a new image from this repository, `build.sh` uses Docker Buildx for
 `linux/amd64`, tags it with the short commit hash and `latest`, and pushes both
 tags by default. Set `PUSH=false` to load the image into the local Docker
