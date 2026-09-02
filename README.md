@@ -39,7 +39,7 @@ Create one Webhook connection in each Arr instance:
 - Sonarr URL: `http://arr-subtitle-guard:8080/webhook/sonarr`
 - Radarr URL: `http://arr-subtitle-guard:8080/webhook/radarr`
 - Method: `POST`
-- Header: `X-Webhook-Token: <WEBHOOK_TOKEN>`
+- Authentication: set Sonarr/Radarr's Webhook `Username` and `Password` fields to `WEBHOOK_USERNAME` and `WEBHOOK_PASSWORD`. The sidecar also accepts `X-Webhook-Token: <WEBHOOK_TOKEN>` or `Authorization: Bearer <WEBHOOK_TOKEN>` when `WEBHOOK_TOKEN` is configured.
 - Enable the `On Download` event. In Sonarr, `On Import Complete` may also be enabled to cover batch imports; both payload shapes are supported. `Grab` is not needed.
 
 The handler acknowledges quickly and processes work in a bounded queue. Duplicate webhook deliveries are serialized per media-file ID.
@@ -61,7 +61,7 @@ For an old/manual library file with no matching import history, the file is dele
 
 - Set `DRY_RUN=true` to probe and log without deleting or searching.
 - Mount media read-only in this sidecar. It only probes the files; Sonarr/Radarr perform deletion in their own container when the sidecar calls the media-file API.
-- Protect the webhook endpoint with `WEBHOOK_TOKEN`; without it, the endpoint accepts requests from any reachable client.
+- Protect the webhook endpoint with `WEBHOOK_USERNAME`/`WEBHOOK_PASSWORD` (the native Arr Webhook fields) or `WEBHOOK_TOKEN`; without either, the endpoint accepts requests from any reachable client.
 - `ffprobe` failures are non-destructive: the file is left in place and the error is logged.
 
 ## Development

@@ -11,16 +11,18 @@ import (
 )
 
 type Config struct {
-	ListenAddr   string
-	WebhookToken string
-	FFprobePath  string
-	StatePath    string
-	MaxAttempts  int
-	Workers      int
-	DryRun       bool
-	PathMappings []PathMapping
-	Sonarr       *ArrConfig
-	Radarr       *ArrConfig
+	ListenAddr      string
+	WebhookToken    string
+	WebhookUsername string
+	WebhookPassword string
+	FFprobePath     string
+	StatePath       string
+	MaxAttempts     int
+	Workers         int
+	DryRun          bool
+	PathMappings    []PathMapping
+	Sonarr          *ArrConfig
+	Radarr          *ArrConfig
 }
 
 type ArrConfig struct {
@@ -38,19 +40,24 @@ type PathMapping struct {
 
 func LoadConfig() (Config, error) {
 	cfg := Config{
-		ListenAddr:   envOr("LISTEN_ADDR", ":8080"),
-		WebhookToken: strings.TrimSpace(os.Getenv("WEBHOOK_TOKEN")),
-		FFprobePath:  envOr("FFPROBE_PATH", "ffprobe"),
-		StatePath:    envOr("STATE_PATH", "./state.json"),
-		MaxAttempts:  envInt("MAX_ATTEMPTS", 3),
-		Workers:      envInt("WORKERS", 2),
-		DryRun:       envBool("DRY_RUN", false),
+		ListenAddr:      envOr("LISTEN_ADDR", ":8080"),
+		WebhookToken:    strings.TrimSpace(os.Getenv("WEBHOOK_TOKEN")),
+		WebhookUsername: strings.TrimSpace(os.Getenv("WEBHOOK_USERNAME")),
+		WebhookPassword: os.Getenv("WEBHOOK_PASSWORD"),
+		FFprobePath:     envOr("FFPROBE_PATH", "ffprobe"),
+		StatePath:       envOr("STATE_PATH", "./state.json"),
+		MaxAttempts:     envInt("MAX_ATTEMPTS", 3),
+		Workers:         envInt("WORKERS", 2),
+		DryRun:          envBool("DRY_RUN", false),
 	}
 	if cfg.MaxAttempts < 1 {
 		return Config{}, errors.New("MAX_ATTEMPTS must be at least 1")
 	}
 	if cfg.Workers < 1 {
 		return Config{}, errors.New("WORKERS must be at least 1")
+	}
+	if (cfg.WebhookUsername == "") != (cfg.WebhookPassword == "") {
+		return Config{}, errors.New("WEBHOOK_USERNAME and WEBHOOK_PASSWORD must be set together")
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("PATH_MAPPINGS_JSON")); raw != "" {

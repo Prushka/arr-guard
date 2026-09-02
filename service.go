@@ -312,8 +312,10 @@ func (s *Service) applyValidation(ctx context.Context, client *ArrClient, file M
 	}
 	key := retryKey(client.Kind(), file, searchEpisodeIDs, relativePath)
 	if validation.Valid {
-		if err := s.state.Reset(key); err != nil {
-			s.log.Warn("could not reset retry state", "error", err, "key", key)
+		if !s.config.DryRun {
+			if err := s.state.Reset(key); err != nil {
+				s.log.Warn("could not reset retry state", "error", err, "key", key)
+			}
 		}
 		return nil
 	}
@@ -504,14 +506,30 @@ func (s *Service) WebhookHandler(kind string) http.HandlerFunc {
 }
 
 func (s *Service) authorized(r *http.Request) bool {
-	if s.config.WebhookToken == "" {
+	tokenConfigured := s.config.WebhookToken != ""
+	basicConfigured := s.config.WebhookUsername != "" || s.config.WebhookPassword != ""
+	if !tokenConfigured && !basicConfigured {
 		return true
 	}
-	value := strings.TrimSpace(r.Header.Get("X-Webhook-Token"))
-	if value == "" {
-		value = strings.TrimPrefix(strings.TrimSpace(r.Header.Get("Authorization")), "Bearer ")
+	if tokenConfigured {
+		value := strings.TrimSpace(r.Header.Get("X-Webhook-Token"))
+		if value == "" {
+			authorization := strings.TrimSpace(r.Header.Get("Authorization"))
+			if len(authorization) >= len("Bearer ") && strings.EqualFold(authorization[:len("Bearer ")], "Bearer ") {
+				value = strings.TrimSpace(authorization[len("Bearer "):])
+			}
+		}
+		if subtle.ConstantTimeCompare([]byte(value), []byte(s.config.WebhookToken)) == 1 {
+			return true
+		}
 	}
-	return subtle.ConstantTimeCompare([]byte(value), []byte(s.config.WebhookToken)) == 1
+	if basicConfigured {
+		username, password, ok := r.BasicAuth()
+		if ok && subtle.ConstantTimeCompare([]byte(username), []byte(s.config.WebhookUsername)) == 1 && subtle.ConstantTimeCompare([]byte(password), []byte(s.config.WebhookPassword)) == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) Serve(ctx context.Context) error {

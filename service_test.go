@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -69,6 +70,33 @@ func TestOldUnknownSubtitleGrace(t *testing.T) {
 	}
 }
 
+func TestDryRunDoesNotMutateRetryStateOrCallArr(t *testing.T) {
+	file := MediaFile{ID: 7, MovieID: 3, RelativePath: "Movie.mkv", Path: "Movie.mkv"}
+	key := retryKey("radarr", file, nil, file.RelativePath)
+	store := &StateStore{state: State{Attempts: map[string]int{key: 2}}}
+	service := &Service{
+		config: Config{DryRun: true, MaxAttempts: 3},
+		log:    slog.Default(),
+		state:  store,
+	}
+	client := testArrClient("radarr", "http://arr.invalid")
+
+	if err := service.applyValidation(context.Background(), client, file, Validation{Valid: true}, file.Path, "", 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Attempts(key); got != 2 {
+		t.Fatalf("valid dry-run changed retry attempts to %d", got)
+	}
+
+	invalid := Validation{Reason: "no subtitles"}
+	if err := service.applyValidation(context.Background(), client, file, invalid, file.Path, "download-id", 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Attempts(key); got != 2 {
+		t.Fatalf("invalid dry-run changed retry attempts to %d", got)
+	}
+}
+
 func TestHistoryDataIsCaseInsensitive(t *testing.T) {
 	record := HistoryRecord{Data: map[string]string{"FileId": "17"}}
 	if got := historyData(record, "fileId"); got != "17" {
@@ -120,6 +148,45 @@ func TestWebhookHandlerAuthAndEnqueue(t *testing.T) {
 	job := <-service.jobs
 	if job.client != client || job.payload.EventType != "Download" || job.payload.EpisodeFile == nil || job.payload.EpisodeFile.ID != 7 {
 		t.Fatalf("enqueued job = %#v", job)
+	}
+}
+
+func TestWebhookHandlerBasicAuth(t *testing.T) {
+	client := testArrClient("sonarr", "http://arr.invalid")
+	service := &Service{
+		config: Config{WebhookUsername: "sonarr", WebhookPassword: "secret"},
+		arr:    map[string]*ArrClient{"sonarr": client},
+		jobs:   make(chan webhookJob, 1),
+	}
+	payload := []byte(`{"eventType":"Download","episodeFile":{"id":7}}`)
+
+	request := httptest.NewRequest(http.MethodPost, "/webhook/sonarr", bytes.NewReader(payload))
+	request.SetBasicAuth("sonarr", "wrong")
+	response := httptest.NewRecorder()
+	service.WebhookHandler("sonarr")(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong basic auth status = %d", response.Code)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/webhook/sonarr", bytes.NewReader(payload))
+	request.SetBasicAuth("sonarr", "secret")
+	response = httptest.NewRecorder()
+	service.WebhookHandler("sonarr")(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("valid basic auth status = %d", response.Code)
+	}
+}
+
+func TestLoadConfigRequiresBasicAuthPair(t *testing.T) {
+	t.Setenv("SONARR_URL", "http://sonarr.invalid")
+	t.Setenv("SONARR_API_KEY", "key")
+	t.Setenv("RADARR_URL", "")
+	t.Setenv("RADARR_API_KEY", "")
+	t.Setenv("WEBHOOK_TOKEN", "")
+	t.Setenv("WEBHOOK_USERNAME", "guard")
+	t.Setenv("WEBHOOK_PASSWORD", "")
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig accepted only one Basic Auth credential")
 	}
 }
 

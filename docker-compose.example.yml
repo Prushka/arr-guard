@@ -9,6 +9,9 @@ services:
       RADARR_URL: "http://radarr:7878"
       RADARR_API_KEY: "replace-me"
       WEBHOOK_TOKEN: "replace-with-a-long-random-token"
+      WEBHOOK_USERNAME: ""
+      WEBHOOK_PASSWORD: ""
+      DRY_RUN: "false"
       PATH_MAPPINGS_JSON: '[{"from":"/tv","to":"/media/tv"},{"from":"/movies","to":"/media/movies"}]'
       STATE_PATH: "/var/lib/arr-subtitle-guard/state.json"
       MAX_ATTEMPTS: "3"
