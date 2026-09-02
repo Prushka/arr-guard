@@ -24,6 +24,9 @@ func (p Prober) Validate(ctx context.Context, filePath string) (Validation, erro
 
 	cmd := exec.CommandContext(probeCtx, p.Path,
 		"-v", "error",
+		// Only subtitle streams are relevant; avoiding audio/video metadata
+		// keeps probes small without limiting subtitle discovery.
+		"-select_streams", "s",
 		"-show_entries", "stream=codec_type,codec_name:stream_tags=language,title:stream_disposition=default,forced,hearing_impaired",
 		"-of", "json",
 		filePath,
