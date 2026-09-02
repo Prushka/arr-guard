@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	pathpkg "path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +23,7 @@ type Service struct {
 	config  Config
 	log     *slog.Logger
 	probe   Prober
+	probeFn func(context.Context, string) (Validation, error)
 	state   *StateStore
 	arr     map[string]*ArrClient
 	jobs    chan webhookJob
@@ -34,6 +37,8 @@ type webhookJob struct {
 	client  *ArrClient
 	payload WebhookPayload
 }
+
+const blockedQueueScanInterval = time.Hour
 
 func NewService(config Config, log *slog.Logger) (*Service, error) {
 	state, err := LoadStateStore(config.StatePath)
@@ -77,11 +82,116 @@ func (s *Service) StartWorkers(ctx context.Context) {
 			}
 		}()
 	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.runBlockedQueueScan(ctx)
+
+		ticker := time.NewTicker(blockedQueueScanInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				s.runBlockedQueueScan(ctx)
+			case <-ctx.Done():
+				return
+			case <-s.stop:
+				return
+			}
+		}
+	}()
 }
 
 func (s *Service) StopWorkers() {
 	close(s.stop)
 	s.wg.Wait()
+}
+
+func (s *Service) runBlockedQueueScan(ctx context.Context) {
+	for _, client := range s.arr {
+		if err := s.recoverBlockedQueue(ctx, client); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Error("blocked queue scan failed", "arr", client.Kind(), "error", err)
+		}
+	}
+}
+
+func (s *Service) recoverBlockedQueue(ctx context.Context, client *ArrClient) error {
+	queue, err := client.Queue(ctx)
+	if err != nil {
+		return fmt.Errorf("list queue: %w", err)
+	}
+
+	var firstErr error
+	recovered := 0
+	for _, item := range queue {
+		if !item.needsImportRecovery() {
+			continue
+		}
+		if err := s.recoverBlockedQueueItem(ctx, client, item); err != nil {
+			s.log.Error("blocked queue item recovery failed", "arr", client.Kind(), "queue_id", item.ID, "download_id", item.DownloadID, "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		recovered++
+	}
+	s.log.Info("blocked queue scan complete", "arr", client.Kind(), "queue_items", len(queue), "recovered", recovered)
+	return firstErr
+}
+
+func (s *Service) recoverBlockedQueueItem(ctx context.Context, client *ArrClient, item QueueRecord) error {
+	if item.ID < 1 {
+		return errors.New("queue item ID is missing")
+	}
+	if client.Kind() == "radarr" {
+		if item.MovieID < 1 {
+			return errors.New("Radarr queue item movie ID is missing")
+		}
+	} else if item.EpisodeID < 1 {
+		return errors.New("Sonarr queue item episode ID is missing")
+	}
+
+	s.log.Warn("blocked queue item requires regrab", "arr", client.Kind(), "queue_id", item.ID, "download_id", item.DownloadID, "movie_id", item.MovieID, "series_id", item.SeriesID, "episode_id", item.EpisodeID, "dry_run", s.config.DryRun)
+	if s.config.DryRun {
+		return nil
+	}
+	if err := client.FailQueueItem(ctx, item.ID, "Subtitle Guard: unable to import automatically"); err != nil {
+		stillQueued, verifyErr := queueItemPresent(ctx, client, item.ID)
+		if verifyErr != nil {
+			return fmt.Errorf("remove and blocklist queue item: %w (verification failed: %v)", err, verifyErr)
+		}
+		if stillQueued {
+			return fmt.Errorf("remove and blocklist queue item: %w", err)
+		}
+		// Arr may finish removing the download but time out its HTTP response
+		// while the download client is being updated. If the queue item is gone,
+		// its blocklist/failure operation completed and it is safe to search.
+		s.log.Warn("queue failure request timed out after item disappeared; continuing replacement search", "arr", client.Kind(), "queue_id", item.ID)
+	}
+	if client.Kind() == "radarr" {
+		if err := client.SearchEpisodes(ctx, item.MovieID, nil); err != nil {
+			return fmt.Errorf("search movie %d: %w", item.MovieID, err)
+		}
+		return nil
+	}
+	if err := client.SearchEpisodes(ctx, item.SeriesID, []int{item.EpisodeID}); err != nil {
+		return fmt.Errorf("search episode %d: %w", item.EpisodeID, err)
+	}
+	return nil
+}
+
+func queueItemPresent(ctx context.Context, client *ArrClient, id int) (bool, error) {
+	queue, err := client.Queue(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, item := range queue {
+		if item.ID == id {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *Service) Enqueue(client *ArrClient, payload WebhookPayload) error {
@@ -229,6 +339,193 @@ func (s *Service) Audit(ctx context.Context) error {
 	return nil
 }
 
+// ScanUnmatched probes media files beneath the configured mapped library roots
+// and writes only subtitle-invalid files to InvalidPath. It intentionally does
+// not call applyValidation: an orphan has no Arr media-file ID, so deletion,
+// blocklisting, and replacement searches are not possible or safe.
+func (s *Service) ScanUnmatched(ctx context.Context) error {
+	roots := scanRoots(s.config.PathMappings)
+	if len(roots) == 0 {
+		return errors.New("unmatched scan requires at least one PATH_MAPPINGS_JSON destination path")
+	}
+
+	matched := make(map[string]struct{})
+	for _, client := range s.arr {
+		files, err := client.ListLibraryFiles(ctx)
+		if err != nil {
+			return fmt.Errorf("list %s library files: %w", client.Kind(), err)
+		}
+		for _, file := range files {
+			if file.ID > 0 && file.SubjectID(client.Kind()) > 0 {
+				path := s.mapPath(file.Path)
+				if path != "" && path != "." {
+					matched[scanPathKey(path)] = struct{}{}
+				}
+			}
+		}
+	}
+
+	report := InvalidReport{
+		GeneratedAt: time.Now().UTC(),
+		Roots:       roots,
+		Files:       make([]InvalidMedia, 0),
+	}
+	scanned := 0
+	unmatchedPaths := make([]string, 0)
+	for _, root := range roots {
+		err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if entry.IsDir() || !isMediaPath(path) {
+				return nil
+			}
+			scanned++
+			if _, ok := matched[scanPathKey(path)]; ok {
+				return nil
+			}
+			unmatchedPaths = append(unmatchedPaths, path)
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("scan unmatched root %s: %w", root, err)
+		}
+	}
+	// Probe unmatched files concurrently, but keep the worker count bounded so
+	// a large network share is not overwhelmed by ffprobe processes.
+	workers := s.config.Workers
+	if workers < 1 {
+		workers = 1
+	}
+	jobs := make(chan string)
+	var probeWG sync.WaitGroup
+	var reportMu sync.Mutex
+	for i := 0; i < workers; i++ {
+		probeWG.Add(1)
+		go func() {
+			defer probeWG.Done()
+			for path := range jobs {
+				if err := ctx.Err(); err != nil {
+					return
+				}
+				info, err := os.Stat(path)
+				if err != nil {
+					s.log.Warn("orphan stat failed", "file", path, "error", err)
+					continue
+				}
+				validation, err := s.probePath(ctx, path)
+				if err != nil {
+					// Probe failures are indeterminate, not subtitle failures.
+					// Keep them out of invalid.json and leave the file untouched.
+					s.log.Warn("orphan probe failed", "file", path, "error", err)
+					continue
+				}
+				if !validation.Valid {
+					record := InvalidMedia{
+						Path:       path,
+						Size:       info.Size(),
+						ModifiedAt: info.ModTime().UTC(),
+						Validation: validation,
+					}
+					reportMu.Lock()
+					report.Files = append(report.Files, record)
+					reportMu.Unlock()
+				}
+			}
+		}()
+	}
+	for _, path := range unmatchedPaths {
+		select {
+		case jobs <- path:
+		case <-ctx.Done():
+			close(jobs)
+			probeWG.Wait()
+			return ctx.Err()
+		}
+	}
+	close(jobs)
+	probeWG.Wait()
+	sort.Slice(report.Files, func(i, j int) bool { return scanPathKey(report.Files[i].Path) < scanPathKey(report.Files[j].Path) })
+	if err := writeInvalidReport(s.config.InvalidPath, report); err != nil {
+		return err
+	}
+	s.log.Info("unmatched scan complete", "roots", len(roots), "media_files", scanned, "unmatched_files", len(unmatchedPaths), "invalid_files", len(report.Files), "output", s.config.InvalidPath)
+	return nil
+}
+
+func scanRoots(mappings []PathMapping) []string {
+	values := make([]string, 0, len(mappings))
+	for _, mapping := range mappings {
+		if root := strings.TrimSpace(mapping.To); root != "" {
+			values = append(values, filepath.Clean(root))
+		}
+	}
+	sort.Slice(values, func(i, j int) bool {
+		return len(values[i]) < len(values[j])
+	})
+	roots := make([]string, 0, len(values))
+	for _, candidate := range values {
+		duplicate := false
+		for _, root := range roots {
+			relative, err := filepath.Rel(root, candidate)
+			if err == nil && (relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			roots = append(roots, candidate)
+		}
+	}
+	return roots
+}
+
+func scanPathKey(value string) string {
+	value = filepath.Clean(strings.TrimSpace(value))
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(value)
+	}
+	return value
+}
+
+var mediaExtensions = map[string]struct{}{
+	".264": {}, ".265": {}, ".3g2": {}, ".3gp": {}, ".asf": {}, ".avi": {}, ".divx": {},
+	".dvr-ms": {}, ".f4v": {}, ".flv": {}, ".iso": {}, ".m2ts": {},
+	".h264": {}, ".h265": {}, ".hevc": {}, ".m3u": {}, ".m3u8": {},
+	".m2v": {}, ".m4v": {}, ".mkv": {}, ".mov": {}, ".mp4": {}, ".mpe": {},
+	".mpeg": {}, ".mpg": {}, ".mpv2": {}, ".mts": {}, ".mxf": {}, ".ogm": {},
+	".ogv": {}, ".rm": {}, ".rmvb": {}, ".ts": {}, ".vob": {},
+	".webm": {}, ".wmv": {}, ".wtv": {}, ".xvid": {},
+}
+
+func isMediaPath(value string) bool {
+	_, ok := mediaExtensions[strings.ToLower(filepath.Ext(value))]
+	return ok
+}
+
+func writeInvalidReport(path string, report InvalidReport) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("INVALID_PATH must not be empty")
+	}
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode invalid report: %w", err)
+	}
+	data = append(data, '\n')
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create invalid report directory: %w", err)
+		}
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("write invalid report: %w", err)
+	}
+	return nil
+}
+
 func (s *Service) auditFile(ctx context.Context, client *ArrClient, file MediaFile) error {
 	validation, pathOnDisk, err := s.validate(ctx, file)
 	if err != nil {
@@ -287,12 +584,19 @@ func (s *Service) validate(ctx context.Context, file MediaFile) (Validation, str
 	if pathOnDisk == "" || pathOnDisk == "." {
 		return Validation{}, pathOnDisk, fmt.Errorf("media file %d has no path", file.ID)
 	}
-	validation, err := s.probe.Validate(ctx, pathOnDisk)
+	validation, err := s.probePath(ctx, pathOnDisk)
 	if err != nil {
 		return Validation{}, pathOnDisk, fmt.Errorf("probe %s: %w", pathOnDisk, err)
 	}
 	validation = applyOldMediaGrace(validation, file.Year, time.Now())
 	return validation, pathOnDisk, nil
+}
+
+func (s *Service) probePath(ctx context.Context, path string) (Validation, error) {
+	if s.probeFn != nil {
+		return s.probeFn(ctx, path)
+	}
+	return s.probe.Validate(ctx, path)
 }
 
 func (s *Service) applyValidation(ctx context.Context, client *ArrClient, file MediaFile, validation Validation, pathOnDisk, downloadID string, importedHistoryID int, searchEpisodeIDs []int) error {
@@ -346,6 +650,10 @@ func (s *Service) applyValidation(ctx context.Context, client *ArrClient, file M
 		if err := s.failOrigin(ctx, client, downloadID, importedHistoryID, validation.Reason); err != nil {
 			remediationErrors = append(remediationErrors, fmt.Errorf("fail originating download: %w", err))
 		}
+	} else {
+		// A manually managed/old file may have no Arr import history. It is
+		// still removed and searched, but there is no release identity to block.
+		s.log.Info("no originating import history; skipping blocklist", "arr", client.Kind(), "file_id", file.ID)
 	}
 	if err := client.SearchEpisodes(ctx, file.SubjectID(client.Kind()), searchEpisodeIDs); err != nil {
 		remediationErrors = append(remediationErrors, fmt.Errorf("search %s subject %d: %w", client.Kind(), file.SubjectID(client.Kind()), err))

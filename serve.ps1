@@ -1,8 +1,5 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('serve', 'audit')]
-    [string]$Mode = 'serve',
-
     [ValidateRange(0, 128)]
     [int]$WorkerCount = 0
 )
@@ -45,7 +42,7 @@ if ($WorkerCount -gt 0) {
 
 Push-Location -LiteralPath $projectDirectory
 try {
-    & go run . $Mode
+    & go run .
     if ($LASTEXITCODE -ne 0) {
         throw "arr-subtitle-guard exited with code $LASTEXITCODE"
     }

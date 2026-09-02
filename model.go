@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -49,12 +50,49 @@ type HistoryPage struct {
 }
 
 type QueueRecord struct {
-	ID         int    `json:"id"`
-	DownloadID string `json:"downloadId"`
+	ID                    int                  `json:"id"`
+	DownloadID            string               `json:"downloadId"`
+	MovieID               int                  `json:"movieId"`
+	SeriesID              int                  `json:"seriesId"`
+	EpisodeID             int                  `json:"episodeId"`
+	Status                string               `json:"status"`
+	TrackedDownloadStatus string               `json:"trackedDownloadStatus"`
+	TrackedDownloadState  string               `json:"trackedDownloadState"`
+	StatusMessages        []QueueStatusMessage `json:"statusMessages"`
+}
+
+type QueueStatusMessage struct {
+	Title    string   `json:"title"`
+	Messages []string `json:"messages"`
+}
+
+func (q QueueRecord) needsImportRecovery() bool {
+	if !strings.EqualFold(strings.TrimSpace(q.Status), "completed") {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(q.TrackedDownloadState), "importBlocked") {
+		return true
+	}
+	for _, status := range q.StatusMessages {
+		if containsImportBlockedText(status.Title) {
+			return true
+		}
+		for _, message := range status.Messages {
+			if containsImportBlockedText(message) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsImportBlockedText(value string) bool {
+	return strings.Contains(strings.ToLower(value), "unable to import automatically")
 }
 
 type QueuePage struct {
-	Records []QueueRecord `json:"records"`
+	Records      []QueueRecord `json:"records"`
+	TotalRecords int           `json:"totalRecords"`
 }
 
 type CommandRequest struct {
@@ -116,4 +154,17 @@ type Validation struct {
 
 type State struct {
 	Attempts map[string]int `json:"attempts"`
+}
+
+type InvalidReport struct {
+	GeneratedAt time.Time      `json:"generatedAt"`
+	Roots       []string       `json:"roots"`
+	Files       []InvalidMedia `json:"files"`
+}
+
+type InvalidMedia struct {
+	Path       string     `json:"path"`
+	Size       int64      `json:"size,omitempty"`
+	ModifiedAt time.Time  `json:"modifiedAt,omitempty"`
+	Validation Validation `json:"validation"`
 }

@@ -9,7 +9,7 @@ Sonarr and Radarr do not expose a general-purpose server add-on/plugin directory
 - `Connections -> Webhook`: post-import `Download` events contain the imported file ID/path and download ID.
 - `Media Management -> Import Extra Files -> Script Import`: a script can run before a file is moved, but a failed script is treated as an import problem and does not itself guarantee blocklisting or a replacement search.
 
-This sidecar uses the webhook for new imports and the REST API for the complete remediation workflow. `audit` handles the existing library once.
+This sidecar uses the webhook for new imports and the REST API for the complete remediation workflow. `MODE=subtitles` handles the existing library once.
 
 ## Run
 
@@ -21,14 +21,29 @@ $env:SONARR_API_KEY = "..."
 $env:RADARR_URL = "http://localhost:7878"
 $env:RADARR_API_KEY = "..."
 $env:PATH_MAPPINGS_JSON = '[{"from":"/tv","to":"D:\\Media\\TV"},{"from":"/movies","to":"D:\\Media\\Movies"}]'
-go run . serve
+$env:MODE = "serve"
+go run .
 ```
 
 Run the one-time scan before enabling webhooks:
 
 ```powershell
-go run . audit
+$env:MODE = "subtitles"
+go run .
 ```
+
+To inspect media files beneath the mapped library roots that are not present
+in either Arr library, run the read-only orphan scan:
+
+```powershell
+$env:MODE = "unmatched"
+go run .
+```
+
+It probes only video files, writes subtitle-invalid results to `invalid.json`
+(or `INVALID_PATH`), and performs no deletion, blocklisting, searching, or
+retry-state updates. Orphan files are not part of `subtitles` or webhook handling,
+because they have no Arr media-file ID to remediate.
 
 For Docker, start from [`docker-compose.example.yml`](docker-compose.example.yml). The media paths in `PATH_MAPPINGS_JSON` must resolve to the same files mounted in the sidecar. Never mount only a download directory: the sidecar needs the managed library files too.
 
@@ -44,18 +59,31 @@ Create one Webhook connection in each Arr instance:
 
 The handler acknowledges quickly and processes work in a bounded queue. Duplicate webhook deliveries are serialized per media-file ID.
 
+While running with `MODE=serve`, the sidecar also checks each configured Arr
+queue at startup and once per hour. It selects only completed items whose
+tracked download state is `importBlocked` or whose status text says they are
+unable to import automatically. For each matching Radarr item it removes and
+blocklists the queue entry, removes it from the download client, and starts a
+movie search. For Sonarr, the replacement search is limited to the affected
+queue episode ID. The queue check makes only one queue request per Arr instance
+per pass and does not inspect media files.
+
 ## Remediation behavior
 
 1. Probe the managed file. Any ffprobe stream with `codec_type=subtitle` is supported, including embedded SubRip/SRT, ASS/SSA, WebVTT, MicroDVD/SUB, DVD bitmap/SUP, PGS, and other codecs exposed by ffprobe. Matching sidecars next to the media are also recognized for `.srt`, `.ass`, `.ssa`, `.vtt`, `.sub`, `.idx`, `.sup`, `.smi`, `.sami`, `.mpl2`, `.ttml`, `.dfxp`, `.usf`, `.scc`, `.stl`, and `.mks` (for example, `Movie.en.srt`). A stream or sidecar tagged `en`, `eng`, `en-US`, or `English` counts as English; an untagged or unrecognized language is recorded as unidentified.
 2. If subtitles exist but every language is non-English/unidentified, media whose Arr year is more than 10 years old is treated as valid. Media with no subtitles is never accepted by this grace rule.
 3. If invalid, delete the managed media file through `/api/v3/episodefile/{id}` or `/api/v3/moviefile/{id}`.
 4. If the originating download is known, remove/blocklist it through the queue API, or mark its grabbed history failed. This emits Arr's normal failed-download event.
-5. Submit `EpisodeSearch` only for the affected Sonarr episode IDs; the sidecar resolves `episodeFileId` through `/api/v3/episode` during audit when a webhook does not include episodes. If that mapping cannot be established, it refuses deletion/search instead of broadening to a whole-series search. Radarr uses `MoviesSearch`. These explicit searches run even when Arr automatic failed-download redownload is disabled.
+5. Submit `EpisodeSearch` only for the affected Sonarr episode IDs; the sidecar resolves `episodeFileId` through `/api/v3/episode` during `subtitles` scans when a webhook does not include episodes. If that mapping cannot be established, it refuses deletion/search instead of broadening to a whole-series search. Radarr uses `MoviesSearch`. These explicit searches run even when Arr automatic failed-download redownload is disabled.
 6. Persist attempts in `STATE_PATH`. Sonarr retries key by affected episode IDs and Radarr retries by movie. After `MAX_ATTEMPTS`, the invalid file is deleted but another automatic search is not started. This prevents a release/indexer that repeatedly lacks subtitles from looping forever.
 
 Sonarr's public queue/history failure endpoints identify a download, not an individual episode. The sidecar therefore scopes replacement searches to the affected episode IDs; when one download contains several episodes, Arr may block that shared release for the download as a whole, which is an API limitation.
 
-For an old/manual library file with no matching import history, the file is deleted and the affected Sonarr episodes or Radarr movie are searched, but no historical release can be blocklisted because Arr has no release identity to mark failed.
+For an old/manual library file with a matching Arr media-file ID but no matching
+import history, the normal rules still apply: an invalid file is deleted and
+the affected Sonarr episodes or Radarr movie are searched. Blocklisting is
+skipped because Arr has no release identity to mark failed. Files found by the
+`unmatched` scan are excluded from these remediation rules entirely.
 
 ## Safety
 
@@ -69,7 +97,7 @@ For an old/manual library file with no matching import history, the file is dele
 ```powershell
 go test ./...
 go vet ./...
-go run . --help  # modes are `serve` (default) and `audit`
+go run . --help  # set MODE to `serve`, `unmatched`, or `subtitles`
 ```
 
 Repository references checked for this implementation:

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -11,29 +12,21 @@ import (
 )
 
 func main() {
-	mode := "serve"
-	if len(os.Args) > 1 {
-		mode = os.Args[1]
-	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	if err := run(ctx, []string{mode}); err != nil {
+	if err := run(ctx, os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context, args []string) error {
-	mode := "serve"
-	if len(args) > 0 && args[0] != "" {
-		mode = args[0]
-	}
-	if mode == "-h" || mode == "--help" || mode == "help" {
-		fmt.Println("usage: arr-subtitle-guard [serve|audit]")
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help") {
+		fmt.Println("usage: MODE=serve|unmatched|subtitles arr-subtitle-guard")
 		return nil
 	}
-	if mode != "serve" && mode != "audit" {
-		return fmt.Errorf("unknown mode %q (want serve or audit)", mode)
+	if len(args) > 0 {
+		return errors.New("command-line modes are removed; set MODE=serve, MODE=unmatched, or MODE=subtitles")
 	}
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -52,8 +45,11 @@ func run(ctx context.Context, args []string) error {
 			return fmt.Errorf("connect to %s: %w", client.Kind(), err)
 		}
 	}
-	if mode == "audit" {
+	if cfg.Mode == "subtitles" {
 		return service.Audit(ctx)
+	}
+	if cfg.Mode == "unmatched" {
+		return service.ScanUnmatched(ctx)
 	}
 	service.StartWorkers(ctx)
 	defer service.StopWorkers()

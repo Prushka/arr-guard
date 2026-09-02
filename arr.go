@@ -224,12 +224,20 @@ func (c *ArrClient) DownloadHistory(ctx context.Context, downloadID string) ([]H
 }
 
 func (c *ArrClient) Queue(ctx context.Context) ([]QueueRecord, error) {
-	query := url.Values{"page": {"1"}, "pageSize": {"1000"}, "sortKey": {"timeleft"}, "sortDirection": {"ascending"}}
-	var page QueuePage
-	if err := c.do(ctx, http.MethodGet, c.apiPath("queue"), query, nil, &page); err != nil {
-		return nil, err
+	const pageSize = 1000
+	all := make([]QueueRecord, 0)
+	for pageNumber := 1; ; pageNumber++ {
+		query := url.Values{"page": {strconv.Itoa(pageNumber)}, "pageSize": {strconv.Itoa(pageSize)}, "sortKey": {"timeleft"}, "sortDirection": {"ascending"}}
+		var page QueuePage
+		if err := c.do(ctx, http.MethodGet, c.apiPath("queue"), query, nil, &page); err != nil {
+			return nil, err
+		}
+		all = append(all, page.Records...)
+		if len(page.Records) == 0 || page.TotalRecords == 0 || len(all) >= page.TotalRecords {
+			break
+		}
 	}
-	return page.Records, nil
+	return all, nil
 }
 
 func (c *ArrClient) FailQueueItem(ctx context.Context, id int, message string) error {

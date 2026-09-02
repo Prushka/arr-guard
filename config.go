@@ -11,12 +11,14 @@ import (
 )
 
 type Config struct {
+	Mode            string
 	ListenAddr      string
 	WebhookToken    string
 	WebhookUsername string
 	WebhookPassword string
 	FFprobePath     string
 	StatePath       string
+	InvalidPath     string
 	MaxAttempts     int
 	Workers         int
 	DryRun          bool
@@ -40,15 +42,22 @@ type PathMapping struct {
 
 func LoadConfig() (Config, error) {
 	cfg := Config{
+		Mode:            strings.ToLower(envOr("MODE", "serve")),
 		ListenAddr:      envOr("LISTEN_ADDR", ":8080"),
 		WebhookToken:    strings.TrimSpace(os.Getenv("WEBHOOK_TOKEN")),
 		WebhookUsername: strings.TrimSpace(os.Getenv("WEBHOOK_USERNAME")),
 		WebhookPassword: os.Getenv("WEBHOOK_PASSWORD"),
 		FFprobePath:     envOr("FFPROBE_PATH", "ffprobe"),
 		StatePath:       envOr("STATE_PATH", "./state.json"),
+		InvalidPath:     envOr("INVALID_PATH", "./invalid.json"),
 		MaxAttempts:     envInt("MAX_ATTEMPTS", 3),
 		Workers:         envInt("WORKERS", 2),
 		DryRun:          envBool("DRY_RUN", false),
+	}
+	switch cfg.Mode {
+	case "serve", "unmatched", "subtitles":
+	default:
+		return Config{}, fmt.Errorf("MODE must be serve, unmatched, or subtitles (got %q)", cfg.Mode)
 	}
 	if cfg.MaxAttempts < 1 {
 		return Config{}, errors.New("MAX_ATTEMPTS must be at least 1")
@@ -107,8 +116,10 @@ func loadArrConfig(prefix, name, kind string) (*ArrConfig, error) {
 
 func (c Config) logValue() slog.Value {
 	return slog.GroupValue(
+		slog.String("mode", c.Mode),
 		slog.String("listen", c.ListenAddr),
 		slog.String("ffprobe", c.FFprobePath),
+		slog.String("invalid_path", c.InvalidPath),
 		slog.Int("workers", c.Workers),
 		slog.Int("max_attempts", c.MaxAttempts),
 		slog.Bool("dry_run", c.DryRun),
