@@ -1,6 +1,6 @@
 services:
   arr-guard:
-    image: ${IMAGE:-meinya/arr-guard}:${IMAGE_TAG:-latest}
+    image: meinya/arr-guard:latest
     platform: linux/amd64
     restart: unless-stopped
     env_file:

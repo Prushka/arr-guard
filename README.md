@@ -45,17 +45,19 @@ It probes only video files, writes subtitle-invalid results to `invalid.json`
 retry-state updates. Orphan files are not part of `subtitles` or webhook handling,
 because they have no Arr media-file ID to remediate.
 
-For Docker, build and start the pinned short-commit image:
+For Docker, pull and start the Docker Hub image:
 
 ```bash
-./build.sh
-IMAGE_TAG="$(git rev-parse --short=7 HEAD)" docker compose up -d
+docker compose pull
+docker compose up -d
 ```
 
-`build.sh` uses Docker Buildx for `linux/amd64`, tags the image with the short
-commit hash and `latest`, and pushes both tags by default. Set `PUSH=false` to
-load the image into the local Docker engine instead. Set `IMAGE` to choose a
-different registry image name:
+The Compose files always use `meinya/arr-guard:latest` from Docker Hub; the
+image name and tag are not configurable through Compose environment variables.
+To publish a new image from this repository, `build.sh` uses Docker Buildx for
+`linux/amd64`, tags it with the short commit hash and `latest`, and pushes both
+tags by default. Set `PUSH=false` to load the image into the local Docker
+engine instead. Set `IMAGE` only when publishing a different registry image:
 
 ```bash
 IMAGE=registry.example.com/media/arr-guard PUSH=true ./build.sh
