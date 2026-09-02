@@ -1,5 +1,8 @@
 .git
 .gitignore
+.env
+.idea
 arr-subtitle-guard
 arr-subtitle-guard.exe
 state.json
+invalid.json

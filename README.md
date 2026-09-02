@@ -45,7 +45,28 @@ It probes only video files, writes subtitle-invalid results to `invalid.json`
 retry-state updates. Orphan files are not part of `subtitles` or webhook handling,
 because they have no Arr media-file ID to remediate.
 
-For Docker, start from [`docker-compose.example.yml`](docker-compose.example.yml). The media paths in `PATH_MAPPINGS_JSON` must resolve to the same files mounted in the sidecar. Never mount only a download directory: the sidecar needs the managed library files too.
+For Docker, build and start the pinned short-commit image:
+
+```bash
+./build.sh
+IMAGE_TAG="$(git rev-parse --short=7 HEAD)" docker compose up -d
+```
+
+`build.sh` uses Docker Buildx for `linux/amd64`, tags the image with the short
+commit hash and `latest`, and loads it into the local Docker engine by default.
+Set `IMAGE` to choose a registry image name and `PUSH=true` to push both tags:
+
+```bash
+IMAGE=registry.example.com/media/arr-subtitle-guard PUSH=true ./build.sh
+```
+
+The Compose deployment reads Arr credentials from `.env`, mounts
+`MEDIA_ROOT` (default `/srv/media`) at `/media`, and uses an identity
+`PATH_MAPPINGS_JSON` because Arr and the sidecar share that container path.
+Set `MEDIA_ROOT` and adjust the mapping if the Arr containers use a different
+path. Never mount only a download directory: the sidecar needs the managed
+library files too. The example remains available in
+[`docker-compose.example.yml`](docker-compose.example.yml).
 
 ## Arr webhook setup
 

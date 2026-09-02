@@ -1,0 +1,21 @@
+services:
+  arr-subtitle-guard:
+    image: ${IMAGE:-arr-subtitle-guard}:${IMAGE_TAG:-latest}
+    platform: linux/amd64
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      MODE: ${MODE:-serve}
+      LISTEN_ADDR: ":8080"
+      INVALID_PATH: "/var/lib/arr-subtitle-guard/invalid.json"
+      STATE_PATH: "/var/lib/arr-subtitle-guard/state.json"
+      PATH_MAPPINGS_JSON: '[{"from":"/media","to":"/media"}]'
+    ports:
+      - "${WEBHOOK_PORT:-8080}:8080"
+    volumes:
+      - ${MEDIA_ROOT:-/srv/media}:/media:ro
+      - arr-subtitle-guard-state:/var/lib/arr-subtitle-guard
+
+volumes:
+  arr-subtitle-guard-state:

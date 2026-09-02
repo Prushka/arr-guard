@@ -1,15 +1,39 @@
-FROM golang:1.26 AS build
+# syntax=docker/dockerfile:1
+
+ARG GO_VERSION=1.26
+
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
+
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+ARG GIT_COMMIT=unknown
+ARG GIT_VERSION=unknown
+
 WORKDIR /src
-COPY go.mod .
+COPY go.mod ./
+RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/arr-subtitle-guard .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /out/arr-subtitle-guard .
 
 FROM debian:bookworm-slim
+
+ARG GIT_COMMIT=unknown
+ARG GIT_VERSION=unknown
+
+LABEL org.opencontainers.image.title="arr-subtitle-guard" \
+    org.opencontainers.image.description="Subtitle validation sidecar for Sonarr and Radarr" \
+    org.opencontainers.image.revision=$GIT_COMMIT \
+    org.opencontainers.image.version=$GIT_VERSION
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-	&& useradd --system --uid 10001 --create-home guard \
-	&& install -d -o guard -g guard /var/lib/arr-subtitle-guard
+    && useradd --system --uid 10001 --create-home guard \
+    && install -d -o guard -g guard /var/lib/arr-subtitle-guard
+
 COPY --from=build /out/arr-subtitle-guard /usr/local/bin/arr-subtitle-guard
 USER guard
 WORKDIR /var/lib/arr-subtitle-guard
