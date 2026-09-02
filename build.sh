@@ -11,6 +11,10 @@ if [[ -z "$GIT_COMMIT" ]]; then
     exit 1
 fi
 
+if [[ -n "$(git -C "$ROOT_DIR" status --porcelain)" ]]; then
+    GIT_COMMIT="${GIT_COMMIT}-dirty"
+fi
+
 output=(--push)
 case "${PUSH:-true}" in
     1|true|TRUE|yes|YES)
