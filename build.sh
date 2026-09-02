@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMAGE="${IMAGE:-arr-subtitle-guard}"
+IMAGE="${IMAGE:-meinya/arr-guard}"
 PLATFORM="linux/amd64"
 GIT_COMMIT="$(git -C "$ROOT_DIR" rev-parse --short=7 HEAD)"
 
@@ -11,12 +11,13 @@ if [[ -z "$GIT_COMMIT" ]]; then
     exit 1
 fi
 
-output=(--load)
-case "${PUSH:-false}" in
+output=(--push)
+case "${PUSH:-true}" in
     1|true|TRUE|yes|YES)
         output=(--push)
         ;;
     0|false|FALSE|no|NO)
+        output=(--load)
         ;;
     *)
         echo "PUSH must be true or false" >&2

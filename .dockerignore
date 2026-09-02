@@ -2,7 +2,7 @@
 .gitignore
 .env
 .idea
-arr-subtitle-guard
-arr-subtitle-guard.exe
+arr-guard
+*.exe
 state.json
 invalid.json

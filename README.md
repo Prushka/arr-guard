@@ -53,11 +53,12 @@ IMAGE_TAG="$(git rev-parse --short=7 HEAD)" docker compose up -d
 ```
 
 `build.sh` uses Docker Buildx for `linux/amd64`, tags the image with the short
-commit hash and `latest`, and loads it into the local Docker engine by default.
-Set `IMAGE` to choose a registry image name and `PUSH=true` to push both tags:
+commit hash and `latest`, and pushes both tags by default. Set `PUSH=false` to
+load the image into the local Docker engine instead. Set `IMAGE` to choose a
+different registry image name:
 
 ```bash
-IMAGE=registry.example.com/media/arr-subtitle-guard PUSH=true ./build.sh
+IMAGE=registry.example.com/media/arr-guard PUSH=true ./build.sh
 ```
 
 The Compose deployment reads Arr credentials from `.env`, mounts
@@ -72,8 +73,8 @@ library files too. The example remains available in
 
 Create one Webhook connection in each Arr instance:
 
-- Sonarr URL: `http://arr-subtitle-guard:8080/webhook/sonarr`
-- Radarr URL: `http://arr-subtitle-guard:8080/webhook/radarr`
+- Sonarr URL: `http://arr-guard:8080/webhook/sonarr`
+- Radarr URL: `http://arr-guard:8080/webhook/radarr`
 - Method: `POST`
 - Authentication: set Sonarr/Radarr's Webhook `Username` and `Password` fields to `WEBHOOK_USERNAME` and `WEBHOOK_PASSWORD`. The sidecar also accepts `X-Webhook-Token: <WEBHOOK_TOKEN>` or `Authorization: Bearer <WEBHOOK_TOKEN>` when `WEBHOOK_TOKEN` is configured.
 - Enable the `On Download` event. In Sonarr, `On Import Complete` may also be enabled to cover batch imports; both payload shapes are supported. `Grab` is not needed.

@@ -44,7 +44,7 @@ Push-Location -LiteralPath $projectDirectory
 try {
     & go run .
     if ($LASTEXITCODE -ne 0) {
-        throw "arr-subtitle-guard exited with code $LASTEXITCODE"
+        throw "arr-guard exited with code $LASTEXITCODE"
     }
 }
 finally {

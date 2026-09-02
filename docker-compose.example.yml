@@ -1,5 +1,5 @@
 services:
-  arr-subtitle-guard:
+  arr-guard:
     build: .
     restart: unless-stopped
     environment:
@@ -13,9 +13,9 @@ services:
       WEBHOOK_USERNAME: ""
       WEBHOOK_PASSWORD: ""
       DRY_RUN: "false"
-      INVALID_PATH: "/var/lib/arr-subtitle-guard/invalid.json"
+      INVALID_PATH: "/var/lib/arr-guard/invalid.json"
       PATH_MAPPINGS_JSON: '[{"from":"/tv","to":"/media/tv"},{"from":"/movies","to":"/media/movies"}]'
-      STATE_PATH: "/var/lib/arr-subtitle-guard/state.json"
+      STATE_PATH: "/var/lib/arr-guard/state.json"
       MAX_ATTEMPTS: "3"
       WORKERS: "2"
     ports:
@@ -23,7 +23,7 @@ services:
     volumes:
       - /srv/media/tv:/media/tv:ro
       - /srv/media/movies:/media/movies:ro
-      - arr-subtitle-guard-state:/var/lib/arr-subtitle-guard
+      - arr-guard-state:/var/lib/arr-guard
 
 volumes:
-  arr-subtitle-guard-state:
+  arr-guard-state:

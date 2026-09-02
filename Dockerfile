@@ -16,14 +16,14 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -trimpath \
     -ldflags="-s -w" \
-    -o /out/arr-subtitle-guard .
+    -o /out/arr-guard .
 
 FROM debian:bookworm-slim
 
 ARG GIT_COMMIT=unknown
 ARG GIT_VERSION=unknown
 
-LABEL org.opencontainers.image.title="arr-subtitle-guard" \
+LABEL org.opencontainers.image.title="arr-guard" \
     org.opencontainers.image.description="Subtitle validation sidecar for Sonarr and Radarr" \
     org.opencontainers.image.revision=$GIT_COMMIT \
     org.opencontainers.image.version=$GIT_VERSION
@@ -32,10 +32,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home guard \
-    && install -d -o guard -g guard /var/lib/arr-subtitle-guard
+    && install -d -o guard -g guard /var/lib/arr-guard
 
-COPY --from=build /out/arr-subtitle-guard /usr/local/bin/arr-subtitle-guard
+COPY --from=build /out/arr-guard /usr/local/bin/arr-guard
 USER guard
-WORKDIR /var/lib/arr-subtitle-guard
+WORKDIR /var/lib/arr-guard
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/arr-subtitle-guard"]
+ENTRYPOINT ["/usr/local/bin/arr-guard"]

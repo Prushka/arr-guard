@@ -22,7 +22,7 @@ func main() {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help") {
-		fmt.Println("usage: MODE=serve|unmatched|subtitles arr-subtitle-guard")
+		fmt.Println("usage: MODE=serve|unmatched|subtitles arr-guard")
 		return nil
 	}
 	if len(args) > 0 {
