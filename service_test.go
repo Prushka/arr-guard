@@ -120,6 +120,63 @@ func TestRetryKeyUsesStableRadarrMovieID(t *testing.T) {
 	}
 }
 
+func TestValidSonarrWebhookStyleResetClearsEpisodeAndLegacyPathKeys(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v3/episode" || r.URL.Query().Get("seriesId") != "42" {
+			t.Fatalf("unexpected request %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":314,"episodeFileId":7}]`))
+	}))
+	defer server.Close()
+
+	store, err := LoadStateStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := MediaFile{ID: 7, ParentID: 42, RelativePath: "Show - S01E01.mkv", Path: "Show - S01E01.mkv"}
+	episodeKey := retryKey("sonarr", file, []int{314}, file.RelativePath)
+	legacyKey := retryKey("sonarr", file, nil, file.RelativePath)
+	if _, err := store.Increment(episodeKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Increment(legacyKey); err != nil {
+		t.Fatal(err)
+	}
+
+	service := &Service{config: Config{DryRun: false}, log: slog.Default(), state: store}
+	if err := service.applyValidationOptions(context.Background(), testArrClient("sonarr", server.URL), file, Validation{Valid: true}, file.Path, "", 0, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Attempts(episodeKey); got != 0 {
+		t.Fatalf("episode retry attempts = %d, want 0", got)
+	}
+	if got := store.Attempts(legacyKey); got != 0 {
+		t.Fatalf("legacy retry attempts = %d, want 0", got)
+	}
+}
+
+func TestWebhookStateExpiresAndLockEntriesAreReleased(t *testing.T) {
+	service := &Service{}
+	if !service.claimWebhook("sonarr:7") || service.claimWebhook("sonarr:7") {
+		t.Fatal("webhook claim did not deduplicate")
+	}
+	service.handledMu.Lock()
+	service.handled["sonarr:7"] = time.Now().Add(-webhookDedupTTL - time.Second)
+	service.handledMu.Unlock()
+	service.cleanupWebhookState()
+	if service.claimWebhook("sonarr:7") == false {
+		t.Fatal("expired webhook claim was not released")
+	}
+	lock := service.acquireFileLock("sonarr:7")
+	service.releaseFileLock("sonarr:7", lock)
+	service.locksMu.Lock()
+	defer service.locksMu.Unlock()
+	if len(service.locks) != 0 {
+		t.Fatalf("released lock remains: %#v", service.locks)
+	}
+}
+
 func TestWebhookHandlerAuthAndEnqueue(t *testing.T) {
 	client := testArrClient("sonarr", "http://arr.invalid")
 	service := &Service{
@@ -540,6 +597,71 @@ func TestInvalidMatchedFileWithoutHistoryIsSearchedWithoutBlocklist(t *testing.T
 		if got := <-requests; got == "GET /api/v3/queue" || got == "POST /api/v3/history/failed/" {
 			t.Fatalf("unexpected blocklist request %q", got)
 		}
+	}
+}
+
+func TestPendingRemediationCleanupRetriesPostDeleteWork(t *testing.T) {
+	var queueCalls, searchCalls, queueDeleteCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v3/moviefile/17":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/queue":
+			queueCalls++
+			if queueCalls == 1 {
+				http.Error(w, "temporary queue failure", http.StatusBadGateway)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"records":[{"id":77,"downloadId":"download-1","movieId":3,"status":"completed"}],"totalRecords":1}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v3/queue/77":
+			queueDeleteCalls++
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/command":
+			searchCalls++
+			if searchCalls == 1 {
+				http.Error(w, "temporary search failure", http.StatusBadGateway)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	store, err := LoadStateStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{
+		config: Config{DryRun: false, MaxAttempts: 3},
+		log:    slog.Default(),
+		state:  store,
+	}
+	file := MediaFile{ID: 17, MovieID: 3, RelativePath: "Movie.mkv", Path: "Movie.mkv"}
+	client := testArrClient("radarr", server.URL)
+	if err := service.applyValidation(context.Background(), client, file, Validation{Reason: "no subtitles"}, file.Path, "download-1", 0, nil); err == nil {
+		t.Fatal("applyValidation unexpectedly succeeded despite post-delete API failures")
+	}
+	service.pendingMu.Lock()
+	pendingCount := len(service.pending)
+	service.pendingMu.Unlock()
+	if pendingCount != 1 {
+		t.Fatalf("pending remediations = %d, want 1", pendingCount)
+	}
+
+	if err := service.CleanupPending(context.Background()); err != nil {
+		t.Fatalf("CleanupPending() error = %v", err)
+	}
+	if queueCalls != 2 || queueDeleteCalls != 1 || searchCalls != 2 {
+		t.Fatalf("cleanup calls: queue=%d queueDelete=%d search=%d, want 2, 1, 2", queueCalls, queueDeleteCalls, searchCalls)
+	}
+	service.pendingMu.Lock()
+	defer service.pendingMu.Unlock()
+	if len(service.pending) != 0 {
+		t.Fatalf("pending remediations remain after successful cleanup: %#v", service.pending)
 	}
 }
 

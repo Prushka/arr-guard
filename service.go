@@ -20,17 +20,29 @@ import (
 )
 
 type Service struct {
-	config  Config
-	log     *slog.Logger
-	probe   Prober
-	probeFn func(context.Context, string) (Validation, error)
-	state   *StateStore
-	arr     map[string]*ArrClient
-	jobs    chan webhookJob
-	stop    chan struct{}
-	wg      sync.WaitGroup
-	locks   sync.Map
-	handled sync.Map
+	config    Config
+	log       *slog.Logger
+	probe     Prober
+	probeFn   func(context.Context, string) (Validation, error)
+	state     *StateStore
+	arr       map[string]*ArrClient
+	jobs      chan webhookJob
+	stop      chan struct{}
+	wg        sync.WaitGroup
+	locksMu   sync.Mutex
+	locks     map[string]*fileLock
+	handledMu sync.Mutex
+	handled   map[string]time.Time
+	stopOnce  sync.Once
+	pendingMu sync.Mutex
+	pending   map[string]*pendingRemediation
+}
+
+// fileLock tracks waiters so an idle lock can be removed without allowing
+// another webhook to create a second lock for the same media file.
+type fileLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 type webhookJob struct {
@@ -38,7 +50,26 @@ type webhookJob struct {
 	payload WebhookPayload
 }
 
+// pendingRemediation records the post-delete work that must still be completed.
+// It is intentionally kept in memory: this is a shutdown safety net for work
+// already started by this process, not a second durable job queue.
+type pendingRemediation struct {
+	key               string
+	client            *ArrClient
+	subjectID         int
+	downloadID        string
+	importedHistoryID int
+	reason            string
+	searchEpisodeIDs  []int
+	originPending     bool
+	searchPending     bool
+}
+
 const blockedQueueScanInterval = time.Hour
+
+// Keep successful webhook IDs briefly to absorb Arr retries while bounding
+// memory use. Failed processing removes the claim immediately for retry.
+const webhookDedupTTL = 24 * time.Hour
 
 func NewService(config Config, log *slog.Logger) (*Service, error) {
 	state, err := LoadStateStore(config.StatePath)
@@ -46,13 +77,16 @@ func NewService(config Config, log *slog.Logger) (*Service, error) {
 		return nil, err
 	}
 	service := &Service{
-		config: config,
-		log:    log,
-		probe:  Prober{Path: config.FFprobePath, Timeout: 10 * time.Minute},
-		state:  state,
-		arr:    make(map[string]*ArrClient),
-		jobs:   make(chan webhookJob, config.Workers*4),
-		stop:   make(chan struct{}),
+		config:  config,
+		log:     log,
+		probe:   Prober{Path: config.FFprobePath, Timeout: 10 * time.Minute},
+		state:   state,
+		arr:     make(map[string]*ArrClient),
+		jobs:    make(chan webhookJob, config.Workers*4),
+		stop:    make(chan struct{}),
+		locks:   make(map[string]*fileLock),
+		handled: make(map[string]time.Time),
+		pending: make(map[string]*pendingRemediation),
 	}
 	if config.Sonarr != nil {
 		service.arr["sonarr"] = NewArrClient(*config.Sonarr, log)
@@ -92,6 +126,7 @@ func (s *Service) StartWorkers(ctx context.Context) {
 		for {
 			select {
 			case <-ticker.C:
+				s.cleanupWebhookState()
 				s.runBlockedQueueScan(ctx)
 			case <-ctx.Done():
 				return
@@ -103,8 +138,80 @@ func (s *Service) StartWorkers(ctx context.Context) {
 }
 
 func (s *Service) StopWorkers() {
-	close(s.stop)
+	s.stopOnce.Do(func() { close(s.stop) })
 	s.wg.Wait()
+}
+
+// CleanupPending retries the post-delete blocklist/failure and replacement
+// search operations that were interrupted by an API error or shutdown.
+// Callers should stop workers first so no new pending entries are added while
+// the cleanup pass is running.
+func (s *Service) CleanupPending(ctx context.Context) error {
+	pending := s.pendingSnapshot()
+	var cleanupErrors []error
+	for _, item := range pending {
+		if item.originPending {
+			if err := s.failOrigin(ctx, item.client, item.downloadID, item.importedHistoryID, item.reason); err != nil {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("cleanup %s origin for %s: %w", item.client.Kind(), item.key, err))
+			} else {
+				s.markPendingOriginDone(item.key)
+			}
+		}
+		if item.searchPending {
+			if err := item.client.SearchEpisodes(ctx, item.subjectID, item.searchEpisodeIDs); err != nil {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("cleanup %s search for %s: %w", item.client.Kind(), item.key, err))
+			} else {
+				s.markPendingSearchDone(item.key)
+			}
+		}
+		s.removePendingIfComplete(item.key)
+	}
+	return errors.Join(cleanupErrors...)
+}
+
+func (s *Service) pendingSnapshot() []*pendingRemediation {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	items := make([]*pendingRemediation, 0, len(s.pending))
+	for _, item := range s.pending {
+		copy := *item
+		copy.searchEpisodeIDs = append([]int(nil), item.searchEpisodeIDs...)
+		items = append(items, &copy)
+	}
+	return items
+}
+
+func (s *Service) registerPending(item pendingRemediation) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if s.pending == nil {
+		s.pending = make(map[string]*pendingRemediation)
+	}
+	s.pending[item.key] = &item
+}
+
+func (s *Service) markPendingOriginDone(key string) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if item := s.pending[key]; item != nil {
+		item.originPending = false
+	}
+}
+
+func (s *Service) markPendingSearchDone(key string) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if item := s.pending[key]; item != nil {
+		item.searchPending = false
+	}
+}
+
+func (s *Service) removePendingIfComplete(key string) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if item := s.pending[key]; item != nil && !item.originPending && !item.searchPending {
+		delete(s.pending, key)
+	}
 }
 
 func (s *Service) runBlockedQueueScan(ctx context.Context) {
@@ -211,61 +318,69 @@ func (s *Service) processWebhook(ctx context.Context, client *ArrClient, payload
 	if len(files) == 0 {
 		return errors.New("download webhook contains no media file")
 	}
+	seen := make(map[string]struct{}, len(files))
 	for _, webhookFile := range files {
 		if webhookFile.ID == 0 {
 			continue
 		}
 		key := fmt.Sprintf("%s:%d", client.Kind(), webhookFile.ID)
-		if _, loaded := s.handled.LoadOrStore(key, struct{}{}); loaded {
+		if _, alreadySeen := seen[key]; alreadySeen {
 			continue
 		}
-		mutex := s.fileMutex(key)
-		mutex.Lock()
-		file, err := client.GetMediaFile(ctx, webhookFile.ID)
-		if err == nil {
-			if file.Path == "" {
-				file.Path = webhookFile.Path
-			}
-			if file.RelativePath == "" {
-				file.RelativePath = webhookFile.RelativePath
-			}
-			if file.Path == "" {
-				if client.Kind() == "sonarr" && payload.Series != nil {
-					file.Path = joinArrPath(payload.Series.Path, file.RelativePath)
-				} else if client.Kind() == "radarr" && payload.Movie != nil {
-					parentPath := payload.Movie.Path
-					if parentPath == "" {
-						parentPath = payload.Movie.FolderPath
-					}
-					file.Path = joinArrPath(parentPath, file.RelativePath)
-				}
-			}
-			if client.Kind() == "sonarr" && file.ParentID == 0 && payload.Series != nil {
-				file.ParentID = payload.Series.ID
-			}
-			if client.Kind() == "sonarr" && file.Year == 0 && payload.Series != nil {
-				file.Year = payload.Series.Year
-			}
-			if client.Kind() == "radarr" && file.MovieID == 0 && payload.Movie != nil {
-				file.MovieID = payload.Movie.ID
-			}
-			if client.Kind() == "radarr" && file.Year == 0 && payload.Movie != nil {
-				file.Year = payload.Movie.Year
-			}
-			downloadID := payload.DownloadID
-			var importedHistoryID int
-			if downloadID == "" {
-				var historyErr error
-				downloadID, importedHistoryID, historyErr = s.findOrigin(ctx, client, file)
-				if historyErr != nil {
-					s.log.Warn("could not resolve file history", "arr", client.Kind(), "file_id", file.ID, "error", historyErr)
-				}
-			}
-			err = s.validateAndRemediateWithHistory(ctx, client, file, downloadID, importedHistoryID, episodeIDsForFile(payload, webhookFile.ID))
+		seen[key] = struct{}{}
+		if !s.claimWebhook(key) {
+			continue
 		}
-		mutex.Unlock()
+		lock := s.acquireFileLock(key)
+		var err error
+		func() {
+			defer s.releaseFileLock(key, lock)
+			defer func() { s.finishWebhook(key, err) }()
+			file, getErr := client.GetMediaFile(ctx, webhookFile.ID)
+			err = getErr
+			if err == nil {
+				if file.Path == "" {
+					file.Path = webhookFile.Path
+				}
+				if file.RelativePath == "" {
+					file.RelativePath = webhookFile.RelativePath
+				}
+				if file.Path == "" {
+					if client.Kind() == "sonarr" && payload.Series != nil {
+						file.Path = joinArrPath(payload.Series.Path, file.RelativePath)
+					} else if client.Kind() == "radarr" && payload.Movie != nil {
+						parentPath := payload.Movie.Path
+						if parentPath == "" {
+							parentPath = payload.Movie.FolderPath
+						}
+						file.Path = joinArrPath(parentPath, file.RelativePath)
+					}
+				}
+				if client.Kind() == "sonarr" && file.ParentID == 0 && payload.Series != nil {
+					file.ParentID = payload.Series.ID
+				}
+				if client.Kind() == "sonarr" && file.Year == 0 && payload.Series != nil {
+					file.Year = payload.Series.Year
+				}
+				if client.Kind() == "radarr" && file.MovieID == 0 && payload.Movie != nil {
+					file.MovieID = payload.Movie.ID
+				}
+				if client.Kind() == "radarr" && file.Year == 0 && payload.Movie != nil {
+					file.Year = payload.Movie.Year
+				}
+				downloadID := payload.DownloadID
+				var importedHistoryID int
+				if downloadID == "" {
+					var historyErr error
+					downloadID, importedHistoryID, historyErr = s.findOrigin(ctx, client, file)
+					if historyErr != nil {
+						s.log.Warn("could not resolve file history", "arr", client.Kind(), "file_id", file.ID, "error", historyErr)
+					}
+				}
+				err = s.validateAndRemediateWithHistoryOptions(ctx, client, file, downloadID, importedHistoryID, episodeIDsForFile(payload, webhookFile.ID), true)
+			}
+		}()
 		if err != nil {
-			s.handled.Delete(key)
 			return err
 		}
 	}
@@ -291,9 +406,72 @@ func (p WebhookPayload) files(kind string) []WebhookFile {
 	return nil
 }
 
-func (s *Service) fileMutex(key string) *sync.Mutex {
-	value, _ := s.locks.LoadOrStore(key, &sync.Mutex{})
-	return value.(*sync.Mutex)
+func (s *Service) claimWebhook(key string) bool {
+	s.handledMu.Lock()
+	defer s.handledMu.Unlock()
+	if s.handled == nil {
+		s.handled = make(map[string]time.Time)
+	}
+	now := time.Now()
+	s.cleanupWebhookStateLocked(now)
+	if handledAt, ok := s.handled[key]; ok && now.Sub(handledAt) < webhookDedupTTL {
+		return false
+	}
+	s.handled[key] = now
+	return true
+}
+
+func (s *Service) cleanupWebhookState() {
+	s.handledMu.Lock()
+	defer s.handledMu.Unlock()
+	s.cleanupWebhookStateLocked(time.Now())
+}
+
+func (s *Service) cleanupWebhookStateLocked(now time.Time) {
+	for handledKey, handledAt := range s.handled {
+		if now.Sub(handledAt) >= webhookDedupTTL {
+			delete(s.handled, handledKey)
+		}
+	}
+}
+
+func (s *Service) finishWebhook(key string, err error) {
+	s.handledMu.Lock()
+	defer s.handledMu.Unlock()
+	if err != nil {
+		delete(s.handled, key)
+		return
+	}
+	if s.handled == nil {
+		s.handled = make(map[string]time.Time)
+	}
+	s.handled[key] = time.Now()
+}
+
+func (s *Service) acquireFileLock(key string) *fileLock {
+	s.locksMu.Lock()
+	if s.locks == nil {
+		s.locks = make(map[string]*fileLock)
+	}
+	lock := s.locks[key]
+	if lock == nil {
+		lock = &fileLock{}
+		s.locks[key] = lock
+	}
+	lock.refs++
+	s.locksMu.Unlock()
+	lock.mu.Lock()
+	return lock
+}
+
+func (s *Service) releaseFileLock(key string, lock *fileLock) {
+	lock.mu.Unlock()
+	s.locksMu.Lock()
+	lock.refs--
+	if lock.refs == 0 && s.locks[key] == lock {
+		delete(s.locks, key)
+	}
+	s.locksMu.Unlock()
 }
 
 func (s *Service) Audit(ctx context.Context) error {
@@ -489,7 +667,7 @@ func writeUnmatchedReport(path string, report UnmatchedReport) error {
 			return fmt.Errorf("create unmatched report directory: %w", err)
 		}
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := writeFileAtomic(path, data, 0o600); err != nil {
 		return fmt.Errorf("write unmatched report: %w", err)
 	}
 	return nil
@@ -538,11 +716,15 @@ func (s *Service) validateAndRemediate(ctx context.Context, client *ArrClient, f
 }
 
 func (s *Service) validateAndRemediateWithHistory(ctx context.Context, client *ArrClient, file MediaFile, downloadID string, importedHistoryID int, searchEpisodeIDs []int) error {
+	return s.validateAndRemediateWithHistoryOptions(ctx, client, file, downloadID, importedHistoryID, searchEpisodeIDs, false)
+}
+
+func (s *Service) validateAndRemediateWithHistoryOptions(ctx context.Context, client *ArrClient, file MediaFile, downloadID string, importedHistoryID int, searchEpisodeIDs []int, resolveEpisodesForValid bool) error {
 	validation, pathOnDisk, err := s.validate(ctx, file)
 	if err != nil {
 		return err
 	}
-	return s.applyValidation(ctx, client, file, validation, pathOnDisk, downloadID, importedHistoryID, searchEpisodeIDs)
+	return s.applyValidationOptions(ctx, client, file, validation, pathOnDisk, downloadID, importedHistoryID, searchEpisodeIDs, resolveEpisodesForValid)
 }
 
 func (s *Service) validate(ctx context.Context, file MediaFile) (Validation, string, error) {
@@ -569,13 +751,20 @@ func (s *Service) probePath(ctx context.Context, path string) (Validation, error
 }
 
 func (s *Service) applyValidation(ctx context.Context, client *ArrClient, file MediaFile, validation Validation, pathOnDisk, downloadID string, importedHistoryID int, searchEpisodeIDs []int) error {
-	if !validation.Valid && !s.config.DryRun && client.Kind() == "sonarr" && len(searchEpisodeIDs) == 0 {
+	return s.applyValidationOptions(ctx, client, file, validation, pathOnDisk, downloadID, importedHistoryID, searchEpisodeIDs, false)
+}
+
+func (s *Service) applyValidationOptions(ctx context.Context, client *ArrClient, file MediaFile, validation Validation, pathOnDisk, downloadID string, importedHistoryID int, searchEpisodeIDs []int, resolveEpisodesForValid bool) error {
+	if !s.config.DryRun && client.Kind() == "sonarr" && len(searchEpisodeIDs) == 0 && (!validation.Valid || resolveEpisodesForValid) {
 		var err error
 		searchEpisodeIDs, err = client.EpisodeIDsForFile(ctx, file.ParentID, file.ID)
 		if err != nil {
-			return fmt.Errorf("resolve Sonarr episodes for file %d: %w", file.ID, err)
+			if !validation.Valid {
+				return fmt.Errorf("resolve Sonarr episodes for file %d: %w", file.ID, err)
+			}
+			s.log.Warn("could not resolve Sonarr episodes for valid file; resetting path retry state only", "file_id", file.ID, "error", err)
 		}
-		if len(searchEpisodeIDs) == 0 {
+		if !validation.Valid && len(searchEpisodeIDs) == 0 {
 			return fmt.Errorf("Sonarr file %d is not assigned to an episode; refusing broad series search", file.ID)
 		}
 	}
@@ -588,6 +777,14 @@ func (s *Service) applyValidation(ctx context.Context, client *ArrClient, file M
 		if !s.config.DryRun {
 			if err := s.state.Reset(key); err != nil {
 				s.log.Warn("could not reset retry state", "error", err, "key", key)
+			}
+			// Older versions used a path key when episode metadata was absent.
+			// Reset it as well so a successful replacement clears legacy state.
+			legacyKey := retryKey(client.Kind(), file, nil, relativePath)
+			if legacyKey != key {
+				if err := s.state.Reset(legacyKey); err != nil {
+					s.log.Warn("could not reset legacy retry state", "error", err, "key", legacyKey)
+				}
 			}
 		}
 		return nil
@@ -614,10 +811,24 @@ func (s *Service) applyValidation(ctx context.Context, client *ArrClient, file M
 		s.log.Error("maximum replacement attempts reached; invalid file deleted without another search", "arr", client.Kind(), "file", pathOnDisk)
 		return nil
 	}
+	pending := pendingRemediation{
+		key:               fmt.Sprintf("%s:file:%d", client.Kind(), file.ID),
+		client:            client,
+		subjectID:         file.SubjectID(client.Kind()),
+		downloadID:        downloadID,
+		importedHistoryID: importedHistoryID,
+		reason:            validation.Reason,
+		searchEpisodeIDs:  append([]int(nil), searchEpisodeIDs...),
+		originPending:     downloadID != "",
+		searchPending:     true,
+	}
+	s.registerPending(pending)
 	var remediationErrors []error
-	if downloadID != "" {
+	if pending.originPending {
 		if err := s.failOrigin(ctx, client, downloadID, importedHistoryID, validation.Reason); err != nil {
 			remediationErrors = append(remediationErrors, fmt.Errorf("fail originating download: %w", err))
+		} else {
+			s.markPendingOriginDone(pending.key)
 		}
 	} else {
 		// A manually managed/old file may have no Arr import history. It is
@@ -626,7 +837,10 @@ func (s *Service) applyValidation(ctx context.Context, client *ArrClient, file M
 	}
 	if err := client.SearchEpisodes(ctx, file.SubjectID(client.Kind()), searchEpisodeIDs); err != nil {
 		remediationErrors = append(remediationErrors, fmt.Errorf("search %s subject %d: %w", client.Kind(), file.SubjectID(client.Kind()), err))
+	} else {
+		s.markPendingSearchDone(pending.key)
 	}
+	s.removePendingIfComplete(pending.key)
 	return errors.Join(remediationErrors...)
 }
 

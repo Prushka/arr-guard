@@ -20,7 +20,7 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, args []string) error {
+func run(ctx context.Context, args []string) (runErr error) {
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help") {
 		fmt.Println("usage: MODE=serve|unmatched|subtitles arr-guard")
 		return nil
@@ -38,6 +38,22 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// A media-file deletion is performed before the failure/blocklist and
+	// replacement-search API calls. Keep a short, independent shutdown window
+	// to finish those calls if the main context is canceled or a run returns
+	// after an API error.
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cleanupCancel()
+		if cleanupErr := service.CleanupPending(cleanupCtx); cleanupErr != nil {
+			log.Error("pending remediation cleanup failed", "error", cleanupErr)
+			if runErr == nil {
+				runErr = cleanupErr
+			} else {
+				runErr = errors.Join(runErr, cleanupErr)
+			}
+		}
+	}()
 	testCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	for _, client := range service.arr {

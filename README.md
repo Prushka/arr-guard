@@ -1,4 +1,4 @@
-# Arr Subtitle Guard
+# Arr Guard
 
 A Go sidecar for Sonarr and Radarr that rejects library files without subtitles or without English subtitles. It uses `ffprobe` for embedded streams, recognizes matching external subtitle files, and uses Arr's REST APIs for deletion, blocklisting, and replacement searches.
 
@@ -107,6 +107,7 @@ per pass and does not inspect media files.
 4. If the originating download is known, remove/blocklist it through the queue API, or mark its grabbed history failed. This emits Arr's normal failed-download event.
 5. Submit `EpisodeSearch` only for the affected Sonarr episode IDs; the sidecar resolves `episodeFileId` through `/api/v3/episode` during `subtitles` scans when a webhook does not include episodes. If that mapping cannot be established, it refuses deletion/search instead of broadening to a whole-series search. Radarr uses `MoviesSearch`. These explicit searches run even when Arr automatic failed-download redownload is disabled.
 6. Persist attempts in `STATE_PATH`. Sonarr retries key by affected episode IDs and Radarr retries by movie. After `MAX_ATTEMPTS`, the invalid file is deleted but another automatic search is not started. This prevents a release/indexer that repeatedly lacks subtitles from looping forever.
+7. If deletion succeeds but a later blocklist/failure or replacement-search call fails, the unfinished operation is retained in memory and retried during graceful program shutdown (with a two-minute cleanup window). A forced kill or host failure cannot run this cleanup.
 
 Sonarr's public queue/history failure endpoints identify a download, not an individual episode. The sidecar therefore scopes replacement searches to the affected episode IDs; when one download contains several episodes, Arr may block that shared release for the download as a whole, which is an API limitation.
 
@@ -122,6 +123,7 @@ skipped because Arr has no release identity to mark failed. Files found by the
 - Mount media read-only in this sidecar. It only probes the files; Sonarr/Radarr perform deletion in their own container when the sidecar calls the media-file API.
 - Protect the webhook endpoint with `WEBHOOK_USERNAME`/`WEBHOOK_PASSWORD` (the native Arr Webhook fields) or `WEBHOOK_TOKEN`; without either, the endpoint accepts requests from any reachable client.
 - `ffprobe` failures are non-destructive: the file is left in place and the error is logged.
+- After a successful Arr media-file deletion, graceful shutdown retries any unfinished blocklist/failure and replacement-search calls before exiting. Keep the process running long enough for the cleanup window to complete; `SIGKILL` and power loss cannot be recovered in memory.
 
 ## Development
 

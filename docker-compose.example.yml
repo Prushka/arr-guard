@@ -4,7 +4,7 @@ services:
     restart: unless-stopped
     environment:
       MODE: "subtitles" #serve #subtitles #unmatched
-      LISTEN_ADDR: ":9292"
+      LISTEN_ADDR: ":8080"
       FFPROBE_PATH: "/usr/local/bin/ffprobe"
       SONARR_URL: "http://sonarr:8989"
       SONARR_API_KEY: "replace-me"
@@ -19,7 +19,7 @@ services:
       WEBHOOK_USERNAME: "replace-me"
       WEBHOOK_PASSWORD: "replace-me"
     ports:
-      - "9292:9292"
+      - "8080:8080"
     volumes:
       - /srv/media:/media:ro
       - /srv/arr-guard:/var/lib/arr-guard

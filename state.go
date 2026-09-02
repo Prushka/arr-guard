@@ -67,8 +67,40 @@ func (s *StateStore) saveLocked() error {
 		return fmt.Errorf("encode state: %w", err)
 	}
 	data = append(data, '\n')
-	if err := os.WriteFile(s.path, data, 0o600); err != nil {
+	if err := writeFileAtomic(s.path, data, 0o600); err != nil {
 		return fmt.Errorf("write state: %w", err)
+	}
+	return nil
+}
+
+// writeFileAtomic writes a complete file next to the destination and then
+// renames it into place. Readers see either the old JSON or the new JSON,
+// never a partially written document.
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer func() {
+		_ = temp.Close()
+		_ = os.Remove(tempPath)
+	}()
+	if err := temp.Chmod(mode); err != nil {
+		return err
+	}
+	if _, err := temp.Write(data); err != nil {
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return err
 	}
 	return nil
 }
