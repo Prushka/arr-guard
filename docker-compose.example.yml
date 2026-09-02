@@ -1,10 +1,9 @@
 services:
   arr-guard:
     image: meinya/arr-guard:latest
-    platform: linux/amd64
     restart: unless-stopped
     environment:
-      MODE: "serve"
+      MODE: "subtitles" #serve #subtitles #unmatched
       LISTEN_ADDR: ":9292"
       FFPROBE_PATH: "/usr/local/bin/ffprobe"
       SONARR_URL: "http://sonarr:8989"
@@ -14,8 +13,10 @@ services:
       DRY_RUN: "false"
       INVALID_PATH: "/var/lib/arr-guard/invalid.json"
       STATE_PATH: "/var/lib/arr-guard/state.json"
-      MAX_ATTEMPTS: "3"
+      MAX_ATTEMPTS: "6"
       WORKERS: "2"
+      WEBHOOK_USERNAME: "replace-me"
+      WEBHOOK_PASSWORD: "replace-me"
     ports:
       - "9292:9292"
     volumes:
