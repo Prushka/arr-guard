@@ -11,7 +11,7 @@ if [[ -z "$GIT_COMMIT" ]]; then
     exit 1
 fi
 
-if [[ -n "$(git -C "$ROOT_DIR" status --porcelain)" ]]; then
+if [[ -n "$(git -C "$ROOT_DIR" -c core.filemode=false status --porcelain --untracked-files=all)" ]]; then
     GIT_COMMIT="${GIT_COMMIT}-dirty"
 fi
 
