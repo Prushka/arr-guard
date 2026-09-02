@@ -156,15 +156,12 @@ type State struct {
 	Attempts map[string]int `json:"attempts"`
 }
 
-type InvalidReport struct {
-	GeneratedAt time.Time      `json:"generatedAt"`
-	Roots       []string       `json:"roots"`
-	Files       []InvalidMedia `json:"files"`
+type UnmatchedReport struct {
+	GeneratedAt time.Time        `json:"generatedAt"`
+	Roots       []string         `json:"roots"`
+	Files       []UnmatchedMedia `json:"files"`
 }
 
-type InvalidMedia struct {
-	Path       string     `json:"path"`
-	Size       int64      `json:"size,omitempty"`
-	ModifiedAt time.Time  `json:"modifiedAt,omitempty"`
-	Validation Validation `json:"validation"`
+type UnmatchedMedia struct {
+	Path string `json:"path"`
 }

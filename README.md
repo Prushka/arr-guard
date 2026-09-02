@@ -40,10 +40,14 @@ $env:MODE = "unmatched"
 go run .
 ```
 
-It probes only video files, writes subtitle-invalid results to `invalid.json`
-(or `INVALID_PATH`), and performs no deletion, blocklisting, searching, or
-retry-state updates. Orphan files are not part of `subtitles` or webhook handling,
-because they have no Arr media-file ID to remediate.
+It scans only video files, writes every file with no matching Arr media-file ID
+to `unmatched.json` (or the path in `INVALID_PATH`), and performs no ffprobe,
+deletion, blocklisting, searching, or retry-state updates. Set
+`UNMATCHED_EXCLUDE_DIRS` to a comma-separated list of directories to skip during
+this scan; relative entries are resolved beneath each mapped scan root. Orphan
+files are not part of `subtitles` or webhook handling, because they have no Arr
+media-file ID to remediate. The report contains paths only (plus scan metadata),
+with no subtitle validation field.
 
 For Docker, pull and start the Docker Hub image:
 

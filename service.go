@@ -339,10 +339,10 @@ func (s *Service) Audit(ctx context.Context) error {
 	return nil
 }
 
-// ScanUnmatched probes media files beneath the configured mapped library roots
-// and writes only subtitle-invalid files to InvalidPath. It intentionally does
-// not call applyValidation: an orphan has no Arr media-file ID, so deletion,
-// blocklisting, and replacement searches are not possible or safe.
+// ScanUnmatched lists media files beneath the configured mapped library roots
+// that do not have a matching Sonarr or Radarr media-file ID. It intentionally
+// does not probe or call applyValidation: an orphan has no Arr media-file ID,
+// so subtitle remediation is neither possible nor safe.
 func (s *Service) ScanUnmatched(ctx context.Context) error {
 	roots := scanRoots(s.config.PathMappings)
 	if len(roots) == 0 {
@@ -365,13 +365,12 @@ func (s *Service) ScanUnmatched(ctx context.Context) error {
 		}
 	}
 
-	report := InvalidReport{
+	report := UnmatchedReport{
 		GeneratedAt: time.Now().UTC(),
 		Roots:       roots,
-		Files:       make([]InvalidMedia, 0),
+		Files:       make([]UnmatchedMedia, 0),
 	}
 	scanned := 0
-	unmatchedPaths := make([]string, 0)
 	for _, root := range roots {
 		err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 			if walkErr != nil {
@@ -380,80 +379,50 @@ func (s *Service) ScanUnmatched(ctx context.Context) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if entry.IsDir() || !isMediaPath(path) {
+			if entry.IsDir() {
+				if s.isUnmatchedExcludedDir(root, path) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !isMediaPath(path) {
 				return nil
 			}
 			scanned++
 			if _, ok := matched[scanPathKey(path)]; ok {
 				return nil
 			}
-			unmatchedPaths = append(unmatchedPaths, path)
+			report.Files = append(report.Files, UnmatchedMedia{Path: path})
 			return nil
 		})
 		if err != nil {
 			return fmt.Errorf("scan unmatched root %s: %w", root, err)
 		}
 	}
-	// Probe unmatched files concurrently, but keep the worker count bounded so
-	// a large network share is not overwhelmed by ffprobe processes.
-	workers := s.config.Workers
-	if workers < 1 {
-		workers = 1
-	}
-	jobs := make(chan string)
-	var probeWG sync.WaitGroup
-	var reportMu sync.Mutex
-	for i := 0; i < workers; i++ {
-		probeWG.Add(1)
-		go func() {
-			defer probeWG.Done()
-			for path := range jobs {
-				if err := ctx.Err(); err != nil {
-					return
-				}
-				info, err := os.Stat(path)
-				if err != nil {
-					s.log.Warn("orphan stat failed", "file", path, "error", err)
-					continue
-				}
-				validation, err := s.probePath(ctx, path)
-				if err != nil {
-					// Probe failures are indeterminate, not subtitle failures.
-					// Keep them out of invalid.json and leave the file untouched.
-					s.log.Warn("orphan probe failed", "file", path, "error", err)
-					continue
-				}
-				if !validation.Valid {
-					record := InvalidMedia{
-						Path:       path,
-						Size:       info.Size(),
-						ModifiedAt: info.ModTime().UTC(),
-						Validation: validation,
-					}
-					reportMu.Lock()
-					report.Files = append(report.Files, record)
-					reportMu.Unlock()
-				}
-			}
-		}()
-	}
-	for _, path := range unmatchedPaths {
-		select {
-		case jobs <- path:
-		case <-ctx.Done():
-			close(jobs)
-			probeWG.Wait()
-			return ctx.Err()
-		}
-	}
-	close(jobs)
-	probeWG.Wait()
 	sort.Slice(report.Files, func(i, j int) bool { return scanPathKey(report.Files[i].Path) < scanPathKey(report.Files[j].Path) })
-	if err := writeInvalidReport(s.config.InvalidPath, report); err != nil {
+	if err := writeUnmatchedReport(s.config.InvalidPath, report); err != nil {
 		return err
 	}
-	s.log.Info("unmatched scan complete", "roots", len(roots), "media_files", scanned, "unmatched_files", len(unmatchedPaths), "invalid_files", len(report.Files), "output", s.config.InvalidPath)
+	s.log.Info("unmatched scan complete", "roots", len(roots), "media_files", scanned, "unmatched_files", len(report.Files), "output", s.config.InvalidPath)
 	return nil
+}
+
+func (s *Service) isUnmatchedExcludedDir(root, path string) bool {
+	pathKey := scanPathKey(path)
+	for _, excluded := range s.config.UnmatchedExcludeDirs {
+		excluded = strings.TrimSpace(excluded)
+		if excluded == "" {
+			continue
+		}
+		excludedKey := scanPathKey(filepath.Clean(excluded))
+		if !filepath.IsAbs(filepath.Clean(excluded)) {
+			excludedKey = scanPathKey(filepath.Join(root, excluded))
+		}
+		if pathKey == excludedKey {
+			return true
+		}
+	}
+	return false
 }
 
 func scanRoots(mappings []PathMapping) []string {
@@ -506,22 +475,22 @@ func isMediaPath(value string) bool {
 	return ok
 }
 
-func writeInvalidReport(path string, report InvalidReport) error {
+func writeUnmatchedReport(path string, report UnmatchedReport) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("INVALID_PATH must not be empty")
 	}
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode invalid report: %w", err)
+		return fmt.Errorf("encode unmatched report: %w", err)
 	}
 	data = append(data, '\n')
 	if dir := filepath.Dir(path); dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("create invalid report directory: %w", err)
+			return fmt.Errorf("create unmatched report directory: %w", err)
 		}
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write invalid report: %w", err)
+		return fmt.Errorf("write unmatched report: %w", err)
 	}
 	return nil
 }

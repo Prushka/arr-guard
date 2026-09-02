@@ -11,20 +11,21 @@ import (
 )
 
 type Config struct {
-	Mode            string
-	ListenAddr      string
-	WebhookToken    string
-	WebhookUsername string
-	WebhookPassword string
-	FFprobePath     string
-	StatePath       string
-	InvalidPath     string
-	MaxAttempts     int
-	Workers         int
-	DryRun          bool
-	PathMappings    []PathMapping
-	Sonarr          *ArrConfig
-	Radarr          *ArrConfig
+	Mode                 string
+	ListenAddr           string
+	WebhookToken         string
+	WebhookUsername      string
+	WebhookPassword      string
+	FFprobePath          string
+	StatePath            string
+	InvalidPath          string
+	MaxAttempts          int
+	Workers              int
+	DryRun               bool
+	PathMappings         []PathMapping
+	UnmatchedExcludeDirs []string
+	Sonarr               *ArrConfig
+	Radarr               *ArrConfig
 }
 
 type ArrConfig struct {
@@ -42,17 +43,18 @@ type PathMapping struct {
 
 func LoadConfig() (Config, error) {
 	cfg := Config{
-		Mode:            strings.ToLower(envOr("MODE", "serve")),
-		ListenAddr:      envOr("LISTEN_ADDR", ":8080"),
-		WebhookToken:    strings.TrimSpace(os.Getenv("WEBHOOK_TOKEN")),
-		WebhookUsername: strings.TrimSpace(os.Getenv("WEBHOOK_USERNAME")),
-		WebhookPassword: os.Getenv("WEBHOOK_PASSWORD"),
-		FFprobePath:     envOr("FFPROBE_PATH", "ffprobe"),
-		StatePath:       envOr("STATE_PATH", "./state.json"),
-		InvalidPath:     envOr("INVALID_PATH", "./invalid.json"),
-		MaxAttempts:     envInt("MAX_ATTEMPTS", 3),
-		Workers:         envInt("WORKERS", 2),
-		DryRun:          envBool("DRY_RUN", false),
+		Mode:                 strings.ToLower(envOr("MODE", "serve")),
+		ListenAddr:           envOr("LISTEN_ADDR", ":8080"),
+		WebhookToken:         strings.TrimSpace(os.Getenv("WEBHOOK_TOKEN")),
+		WebhookUsername:      strings.TrimSpace(os.Getenv("WEBHOOK_USERNAME")),
+		WebhookPassword:      os.Getenv("WEBHOOK_PASSWORD"),
+		FFprobePath:          envOr("FFPROBE_PATH", "ffprobe"),
+		StatePath:            envOr("STATE_PATH", "./state.json"),
+		InvalidPath:          envOr("INVALID_PATH", "./unmatched.json"),
+		MaxAttempts:          envInt("MAX_ATTEMPTS", 3),
+		Workers:              envInt("WORKERS", 2),
+		DryRun:               envBool("DRY_RUN", false),
+		UnmatchedExcludeDirs: envCSVPaths("UNMATCHED_EXCLUDE_DIRS"),
 	}
 	switch cfg.Mode {
 	case "serve", "unmatched", "subtitles":
@@ -147,4 +149,16 @@ func envBool(key string, fallback bool) bool {
 		return fallback
 	}
 	return value
+}
+
+func envCSVPaths(key string) []string {
+	values := make([]string, 0)
+	for _, raw := range strings.Split(os.Getenv(key), ",") {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		values = append(values, value)
+	}
+	return values
 }

@@ -394,30 +394,33 @@ func TestIsMediaPath(t *testing.T) {
 	}
 }
 
-func TestWriteInvalidReport(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "nested", "invalid.json")
-	report := InvalidReport{
+func TestWriteUnmatchedReport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "unmatched.json")
+	report := UnmatchedReport{
 		GeneratedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
 		Roots:       []string{"D:\\Media"},
-		Files:       []InvalidMedia{{Path: "D:\\Media\\orphan.mkv", Validation: Validation{Reason: "no subtitles"}}},
+		Files:       []UnmatchedMedia{{Path: "D:\\Media\\orphan.mkv"}},
 	}
-	if err := writeInvalidReport(path, report); err != nil {
+	if err := writeUnmatchedReport(path, report); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var decoded InvalidReport
+	if strings.Contains(string(data), `"validation"`) {
+		t.Fatalf("unmatched report unexpectedly contains validation: %s", data)
+	}
+	var decoded UnmatchedReport
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if len(decoded.Files) != 1 || decoded.Files[0].Path != report.Files[0].Path || decoded.Files[0].Validation.Reason != "no subtitles" {
+	if len(decoded.Files) != 1 || decoded.Files[0].Path != report.Files[0].Path {
 		t.Fatalf("decoded report = %#v", decoded)
 	}
 }
 
-func TestScanUnmatchedWritesOnlyInvalidOrphans(t *testing.T) {
+func TestScanUnmatchedWritesAllOrphansWithoutProbing(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "media")
 	if err := os.MkdirAll(filepath.Join(root, "Show"), 0o755); err != nil {
 		t.Fatal(err)
@@ -425,11 +428,15 @@ func TestScanUnmatchedWritesOnlyInvalidOrphans(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "Orphans"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(root, "Excluded"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	paths := map[string]string{
-		"matched": filepath.Join(root, "Show", "matched.mkv"),
-		"invalid": filepath.Join(root, "Orphans", "invalid.mp4"),
-		"valid":   filepath.Join(root, "Orphans", "valid.webm"),
-		"sidecar": filepath.Join(root, "Orphans", "subtitle.sup"),
+		"matched":  filepath.Join(root, "Show", "matched.mkv"),
+		"invalid":  filepath.Join(root, "Orphans", "invalid.mp4"),
+		"valid":    filepath.Join(root, "Orphans", "valid.webm"),
+		"sidecar":  filepath.Join(root, "Orphans", "subtitle.sup"),
+		"excluded": filepath.Join(root, "Excluded", "hidden.mkv"),
 	}
 	for _, path := range paths {
 		if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
@@ -459,23 +466,16 @@ func TestScanUnmatchedWritesOnlyInvalidOrphans(t *testing.T) {
 	}))
 	defer server.Close()
 
-	probeCalls := make(chan string, 4)
-	reportPath := filepath.Join(t.TempDir(), "invalid.json")
+	reportPath := filepath.Join(t.TempDir(), "unmatched.json")
 	service := &Service{
 		config: Config{
-			PathMappings: []PathMapping{{From: "/media", To: root}},
-			InvalidPath:  reportPath,
-			Workers:      2,
+			PathMappings:         []PathMapping{{From: "/media", To: root}},
+			InvalidPath:          reportPath,
+			Workers:              2,
+			UnmatchedExcludeDirs: []string{filepath.Join(root, "Excluded")},
 		},
 		log: slog.Default(),
 		arr: map[string]*ArrClient{"sonarr": testArrClient("sonarr", server.URL)},
-		probeFn: func(_ context.Context, path string) (Validation, error) {
-			probeCalls <- path
-			if path == paths["invalid"] {
-				return Validation{Reason: "no subtitles"}, nil
-			}
-			return Validation{Valid: true, HasSubtitles: true, HasEnglish: true}, nil
-		},
 	}
 	if err := service.ScanUnmatched(context.Background()); err != nil {
 		t.Fatal(err)
@@ -484,19 +484,17 @@ func TestScanUnmatchedWritesOnlyInvalidOrphans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var report InvalidReport
+	var report UnmatchedReport
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Files) != 1 || report.Files[0].Path != paths["invalid"] {
-		t.Fatalf("invalid orphan report = %#v", report)
+	if len(report.Files) != 2 || report.Files[0].Path != paths["invalid"] || report.Files[1].Path != paths["valid"] {
+		t.Fatalf("unmatched orphan report = %#v", report)
 	}
-	seen := make(map[string]bool)
-	for len(probeCalls) > 0 {
-		seen[<-probeCalls] = true
-	}
-	if !seen[paths["invalid"]] || !seen[paths["valid"]] || seen[paths["matched"]] {
-		t.Fatalf("probed paths = %#v", seen)
+	for _, file := range report.Files {
+		if file.Path == paths["excluded"] || file.Path == paths["matched"] {
+			t.Fatalf("unexpected path in orphan report: %#v", file)
+		}
 	}
 }
 
