@@ -46,26 +46,12 @@ func (p Prober) Validate(ctx context.Context, filePath string) (Validation, erro
 		return Validation{}, fmt.Errorf("decode ffprobe output: %w", err)
 	}
 
-	languages := make(map[string]struct{})
-	hasSubtitles := false
-	hasEnglish := false
-	hasUnknownLanguage := false
+	summary := newSubtitleSummary()
 	for _, stream := range result.Streams {
 		if stream.CodecType != "subtitle" {
 			continue
 		}
-		hasSubtitles = true
-		language := subtitleStreamLanguage(stream.Tags)
-		if language == "" {
-			language = "und"
-		}
-		if isUnidentifiedLanguage(language) {
-			hasUnknownLanguage = true
-		}
-		languages[language] = struct{}{}
-		if language == "en" {
-			hasEnglish = true
-		}
+		summary.add(subtitleStreamLanguage(stream.Tags))
 	}
 
 	// Arr commonly stores subtitles as sidecar files next to the video. They
@@ -76,38 +62,57 @@ func (p Prober) Validate(ctx context.Context, filePath string) (Validation, erro
 		return Validation{}, fmt.Errorf("inspect external subtitles: %w", err)
 	}
 	for _, subtitle := range external {
-		hasSubtitles = true
-		language := subtitle.Language
-		if language == "" {
-			language = "und"
-		}
-		if isUnidentifiedLanguage(language) {
-			hasUnknownLanguage = true
-		}
-		languages[language] = struct{}{}
-		if language == "en" {
-			hasEnglish = true
-		}
+		summary.add(subtitle.Language)
 	}
 
-	values := make([]string, 0, len(languages))
-	for language := range languages {
+	return summary.validation(), nil
+}
+
+// subtitleSummary records the stream type from ffprobe rather than a fixed
+// codec allowlist. This includes text, bitmap, and future subtitle codecs as
+// long as ffprobe reports codec_type=subtitle.
+type subtitleSummary struct {
+	languages  map[string]struct{}
+	hasEnglish bool
+	hasUnknown bool
+}
+
+func newSubtitleSummary() subtitleSummary {
+	return subtitleSummary{languages: make(map[string]struct{})}
+}
+
+func (s *subtitleSummary) add(language string) {
+	if language == "" {
+		language = "und"
+	}
+	if isUnidentifiedLanguage(language) {
+		s.hasUnknown = true
+	}
+	s.languages[language] = struct{}{}
+	if language == "en" {
+		s.hasEnglish = true
+	}
+}
+
+func (s subtitleSummary) validation() Validation {
+	values := make([]string, 0, len(s.languages))
+	for language := range s.languages {
 		values = append(values, language)
 	}
 	sort.Strings(values)
 	validation := Validation{
-		Valid:              hasSubtitles && hasEnglish,
-		HasSubtitles:       hasSubtitles,
-		HasEnglish:         hasEnglish,
-		HasUnknownLanguage: hasUnknownLanguage,
+		Valid:              len(s.languages) > 0 && s.hasEnglish,
+		HasSubtitles:       len(s.languages) > 0,
+		HasEnglish:         s.hasEnglish,
+		HasUnknownLanguage: s.hasUnknown,
 		SubtitleLangs:      values,
 	}
-	if !hasSubtitles {
+	if !validation.HasSubtitles {
 		validation.Reason = "no embedded or sidecar subtitle"
-	} else if !hasEnglish {
+	} else if !validation.HasEnglish {
 		validation.Reason = "no English subtitle stream or sidecar"
 	}
-	return validation, nil
+	return validation
 }
 
 type externalSubtitle struct {
@@ -120,6 +125,7 @@ var subtitleExtensions = map[string]struct{}{
 	".idx":  {},
 	".mks":  {},
 	".mpl2": {},
+	".pgs":  {},
 	".sami": {},
 	".smi":  {},
 	".scc":  {},

@@ -3,7 +3,9 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
 )
 
 func TestNormalizeLanguage(t *testing.T) {
@@ -41,6 +43,43 @@ func TestSubtitleStreamLanguageUsesEnglishTitleWhenTagIsUndetermined(t *testing.
 	}
 }
 
+func TestEnglishLabeledImageSubtitleCountsAsEnglish(t *testing.T) {
+	for _, language := range []string{"en", "eng", "en-US"} {
+		summary := newSubtitleSummary()
+		summary.add(subtitleStreamLanguage(map[string]string{"language": language}))
+		validation := summary.validation()
+		if !validation.Valid || !validation.HasEnglish {
+			t.Fatalf("image subtitle tagged %q was not accepted: %#v", language, validation)
+		}
+	}
+}
+
+func TestProberRecognizesEnglishSubtitleRegardlessOfCodecName(t *testing.T) {
+	dir := t.TempDir()
+	media := filepath.Join(dir, "Movie.2024.mkv")
+	if err := os.WriteFile(media, []byte("placeholder"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	probePath := filepath.Join(dir, "fake-ffprobe")
+	probeBody := `{"streams":[{"codec_type":"subtitle","codec_name":"unlisted_future_subtitle_codec","tags":{"language":"eng"}}]}`
+	if runtime.GOOS == "windows" {
+		probePath += ".cmd"
+		probeBody = "@echo off\r\necho " + probeBody + "\r\n"
+	} else {
+		probeBody = "#!/bin/sh\nprintf '%s' '" + probeBody + "'\n"
+	}
+	if err := os.WriteFile(probePath, []byte(probeBody), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	validation, err := (Prober{Path: probePath, Timeout: time.Second}).Validate(t.Context(), media)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !validation.Valid || !validation.HasEnglish || !validation.HasSubtitles {
+		t.Fatalf("English PGS stream was not accepted: %#v", validation)
+	}
+}
+
 func TestSidecarLanguage(t *testing.T) {
 	tests := map[string]string{
 		"en":         "en",
@@ -63,7 +102,7 @@ func TestDiscoverExternalSubtitleFormats(t *testing.T) {
 	if err := os.WriteFile(media, []byte("placeholder"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"Movie.2024.en.srt", "Movie.2024.en.ass", "Movie.2024.en.vtt", "Movie.2024.en.sub", "Movie.2024.en.sup"} {
+	for _, name := range []string{"Movie.2024.en.srt", "Movie.2024.en.ass", "Movie.2024.en.vtt", "Movie.2024.en.sub", "Movie.2024.en.idx", "Movie.2024.en.sup", "Movie.2024.en.pgs"} {
 		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -75,8 +114,8 @@ func TestDiscoverExternalSubtitleFormats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 5 {
-		t.Fatalf("discovered %d sidecars, want 5: %#v", len(got), got)
+	if len(got) != 7 {
+		t.Fatalf("discovered %d sidecars, want 7: %#v", len(got), got)
 	}
 	for _, subtitle := range got {
 		if subtitle.Language != "en" {
