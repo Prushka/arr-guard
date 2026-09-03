@@ -41,7 +41,7 @@ go run .
 ```
 
 It scans only video files, writes every file with no matching Arr media-file ID
-to `unmatched.json` (or the path in `INVALID_PATH`), and performs no ffprobe,
+to `unmatched.json` (or the path in `UNMATCHED_PATH`), and performs no ffprobe,
 deletion, blocklisting, searching, or retry-state updates. Set
 `UNMATCHED_EXCLUDE_DIRS` to a comma-separated list of directories to skip during
 this scan; relative entries are resolved beneath each mapped scan root. Orphan

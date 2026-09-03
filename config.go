@@ -18,7 +18,7 @@ type Config struct {
 	WebhookPassword      string
 	FFprobePath          string
 	StatePath            string
-	InvalidPath          string
+	UnmatchedPath        string
 	MaxAttempts          int
 	Workers              int
 	DryRun               bool
@@ -50,7 +50,7 @@ func LoadConfig() (Config, error) {
 		WebhookPassword:      os.Getenv("WEBHOOK_PASSWORD"),
 		FFprobePath:          envOr("FFPROBE_PATH", "ffprobe"),
 		StatePath:            envOr("STATE_PATH", "./state.json"),
-		InvalidPath:          envOr("INVALID_PATH", "./unmatched.json"),
+		UnmatchedPath:        envOr("UNMATCHED_PATH", "./unmatched.json"),
 		MaxAttempts:          envInt("MAX_ATTEMPTS", 3),
 		Workers:              envInt("WORKERS", 2),
 		DryRun:               envBool("DRY_RUN", false),
@@ -121,7 +121,7 @@ func (c Config) logValue() slog.Value {
 		slog.String("mode", c.Mode),
 		slog.String("listen", c.ListenAddr),
 		slog.String("ffprobe", c.FFprobePath),
-		slog.String("invalid_path", c.InvalidPath),
+		slog.String("unmatched_path", c.UnmatchedPath),
 		slog.Int("workers", c.Workers),
 		slog.Int("max_attempts", c.MaxAttempts),
 		slog.Bool("dry_run", c.DryRun),

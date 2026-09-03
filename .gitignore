@@ -1,5 +1,5 @@
 /arr-guard
 /*.exe
 /state.json
-/invalid.json
+/unmatched.json
 .env

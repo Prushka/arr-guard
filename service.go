@@ -578,10 +578,10 @@ func (s *Service) ScanUnmatched(ctx context.Context) error {
 		}
 	}
 	sort.Slice(report.Files, func(i, j int) bool { return scanPathKey(report.Files[i].Path) < scanPathKey(report.Files[j].Path) })
-	if err := writeUnmatchedReport(s.config.InvalidPath, report); err != nil {
+	if err := writeUnmatchedReport(s.config.UnmatchedPath, report); err != nil {
 		return err
 	}
-	s.log.Info("unmatched scan complete", "roots", len(roots), "media_files", scanned, "unmatched_files", len(report.Files), "output", s.config.InvalidPath)
+	s.log.Info("unmatched scan complete", "roots", len(roots), "media_files", scanned, "unmatched_files", len(report.Files), "output", s.config.UnmatchedPath)
 	return nil
 }
 
@@ -655,7 +655,7 @@ func isMediaPath(value string) bool {
 
 func writeUnmatchedReport(path string, report UnmatchedReport) error {
 	if strings.TrimSpace(path) == "" {
-		return errors.New("INVALID_PATH must not be empty")
+		return errors.New("UNMATCHED_PATH must not be empty")
 	}
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {

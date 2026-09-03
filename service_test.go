@@ -527,7 +527,7 @@ func TestScanUnmatchedWritesAllOrphansWithoutProbing(t *testing.T) {
 	service := &Service{
 		config: Config{
 			PathMappings:         []PathMapping{{From: "/media", To: root}},
-			InvalidPath:          reportPath,
+			UnmatchedPath:        reportPath,
 			Workers:              2,
 			UnmatchedExcludeDirs: []string{filepath.Join(root, "Excluded")},
 		},
