@@ -67,6 +67,8 @@ type pendingRemediation struct {
 
 const blockedQueueScanInterval = time.Hour
 
+const silentMediaSkipAfterYears = 50
+
 // Keep successful webhook IDs briefly to absorb Arr retries while bounding
 // memory use. Failed processing removes the claim immediately for retry.
 const webhookDedupTTL = 24 * time.Hour
@@ -368,6 +370,19 @@ func (s *Service) processWebhook(ctx context.Context, client *ArrClient, payload
 				if client.Kind() == "radarr" && file.Year == 0 && payload.Movie != nil {
 					file.Year = payload.Movie.Year
 				}
+				if client.Kind() == "sonarr" && mayBeSilentMedia(file.Year, time.Now()) {
+					releaseYear, releaseYearErr := client.EpisodeReleaseYearForFile(ctx, file.ParentID, file.ID)
+					if releaseYearErr != nil {
+						err = fmt.Errorf("resolve Sonarr episode release year for file %d: %w", file.ID, releaseYearErr)
+						return
+					}
+					if releaseYear > 0 {
+						file.Year = releaseYear
+					}
+				}
+				if s.skipSilentMediaGuard(client, file) {
+					return
+				}
 				downloadID := payload.DownloadID
 				var importedHistoryID int
 				if downloadID == "" {
@@ -476,7 +491,7 @@ func (s *Service) releaseFileLock(key string, lock *fileLock) {
 
 func (s *Service) Audit(ctx context.Context) error {
 	for _, client := range s.arr {
-		files, err := client.ListLibraryFiles(ctx)
+		files, err := client.ListSubtitleGuardFiles(ctx)
 		if err != nil {
 			return fmt.Errorf("audit %s: %w", client.Kind(), err)
 		}
@@ -674,6 +689,9 @@ func writeUnmatchedReport(path string, report UnmatchedReport) error {
 }
 
 func (s *Service) auditFile(ctx context.Context, client *ArrClient, file MediaFile) error {
+	if s.skipSilentMediaGuard(client, file) {
+		return nil
+	}
 	validation, pathOnDisk, err := s.validate(ctx, file)
 	if err != nil {
 		return err
@@ -712,6 +730,9 @@ func historyData(record HistoryRecord, key string) string {
 }
 
 func (s *Service) validateAndRemediateWithHistoryOptions(ctx context.Context, client *ArrClient, file MediaFile, downloadID string, importedHistoryID int, searchEpisodeIDs []int, resolveEpisodesForValid bool) error {
+	if s.skipSilentMediaGuard(client, file) {
+		return nil
+	}
 	validation, pathOnDisk, err := s.validate(ctx, file)
 	if err != nil {
 		return err
@@ -866,6 +887,22 @@ func episodeIDsForFile(payload WebhookPayload, fileID int) []int {
 
 func isOlderThanTenYears(year int, now time.Time) bool {
 	return year > 0 && now.Year()-year > 10
+}
+
+func mayBeSilentMedia(year int, now time.Time) bool {
+	return year == 0 || shouldSkipSilentMedia(year, now)
+}
+
+func shouldSkipSilentMedia(year int, now time.Time) bool {
+	return year > 0 && now.Year()-year > silentMediaSkipAfterYears
+}
+
+func (s *Service) skipSilentMediaGuard(client *ArrClient, file MediaFile) bool {
+	if !shouldSkipSilentMedia(file.Year, time.Now()) {
+		return false
+	}
+	s.log.Info("subtitle guard skipped media older than 50 years", "arr", client.Kind(), "file_id", file.ID, "year", file.Year)
+	return true
 }
 
 func applyOldMediaGrace(validation Validation, year int, now time.Time) Validation {

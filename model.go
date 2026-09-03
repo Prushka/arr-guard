@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -119,8 +120,22 @@ type WebhookPayload struct {
 }
 
 type Episode struct {
-	ID            int `json:"id"`
-	EpisodeFileID int `json:"episodeFileId"`
+	ID            int        `json:"id"`
+	EpisodeFileID int        `json:"episodeFileId"`
+	AirDate       string     `json:"airDate"`
+	AirDateUTC    *time.Time `json:"airDateUtc"`
+}
+
+func (e Episode) ReleaseYear() int {
+	if len(e.AirDate) >= 4 {
+		if year, err := strconv.Atoi(e.AirDate[:4]); err == nil && year > 0 {
+			return year
+		}
+	}
+	if e.AirDateUTC != nil {
+		return e.AirDateUTC.Year()
+	}
+	return 0
 }
 
 type WebhookFile struct {

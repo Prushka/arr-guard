@@ -71,6 +71,146 @@ func TestOldUnknownSubtitleGrace(t *testing.T) {
 	}
 }
 
+func TestSilentMediaSkipBoundary(t *testing.T) {
+	now := time.Now()
+	if !shouldSkipSilentMedia(now.Year()-51, now) {
+		t.Fatal("media older than 50 years was not skipped")
+	}
+	if shouldSkipSilentMedia(now.Year()-50, now) {
+		t.Fatal("media exactly 50 years old was unexpectedly skipped")
+	}
+	if shouldSkipSilentMedia(0, now) {
+		t.Fatal("media with an unknown year was unexpectedly skipped")
+	}
+}
+
+func TestAuditSkipsSilentMediaBeforeProbe(t *testing.T) {
+	probed := false
+	service := &Service{
+		log: slog.Default(),
+		probeFn: func(context.Context, string) (Validation, error) {
+			probed = true
+			return Validation{}, nil
+		},
+	}
+	file := MediaFile{ID: 7, MovieID: 3, Year: time.Now().Year() - 51, Path: "Movie.mkv"}
+	if err := service.auditFile(context.Background(), testArrClient("radarr", "http://arr.invalid"), file); err != nil {
+		t.Fatal(err)
+	}
+	if probed {
+		t.Fatal("subtitle guard probed media older than 50 years")
+	}
+}
+
+func TestWebhookSkipsSilentMovieBeforeProbe(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v3/moviefile/7" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":7,"movieId":3,"path":"/media/Movie.mkv"}`))
+	}))
+	defer server.Close()
+
+	probed := false
+	service := &Service{
+		log: slog.Default(),
+		probeFn: func(context.Context, string) (Validation, error) {
+			probed = true
+			return Validation{}, nil
+		},
+	}
+	payload := WebhookPayload{
+		EventType:  "Download",
+		DownloadID: "download-id",
+		Movie:      &Movie{ID: 3, Year: time.Now().Year() - 51},
+		MovieFile:  &WebhookFile{ID: 7},
+	}
+	if err := service.processWebhook(context.Background(), testArrClient("radarr", server.URL), payload); err != nil {
+		t.Fatal(err)
+	}
+	if probed {
+		t.Fatal("webhook subtitle guard probed movie older than 50 years")
+	}
+}
+
+func TestWebhookUsesEpisodeReleaseYearForSilentMediaSkip(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/episodefile/7":
+			if r.Method != http.MethodGet {
+				t.Fatalf("episode file method = %s", r.Method)
+			}
+			_, _ = w.Write([]byte(`{"id":7,"seriesId":3,"path":"/media/Show/S01E01.mkv"}`))
+		case "/api/v3/episode":
+			if r.Method != http.MethodGet || r.URL.Query().Get("seriesId") != "3" {
+				t.Fatalf("episode request = %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`[{"id":8,"episodeFileId":7,"airDate":"1920-01-01"}]`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	probed := false
+	service := &Service{
+		log: slog.Default(),
+		probeFn: func(context.Context, string) (Validation, error) {
+			probed = true
+			return Validation{}, nil
+		},
+	}
+	payload := WebhookPayload{
+		EventType:   "Download",
+		DownloadID:  "download-id",
+		Series:      &Series{ID: 3, Year: 1920},
+		EpisodeFile: &WebhookFile{ID: 7},
+	}
+	if err := service.processWebhook(context.Background(), testArrClient("sonarr", server.URL), payload); err != nil {
+		t.Fatal(err)
+	}
+	if probed {
+		t.Fatal("webhook subtitle guard probed episode older than 50 years")
+	}
+}
+
+func TestWebhookDoesNotSkipModernEpisodeOfOldSeries(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/episodefile/7":
+			_, _ = w.Write([]byte(`{"id":7,"seriesId":3,"path":"/media/Show/S01E01.mkv"}`))
+		case "/api/v3/episode":
+			_, _ = w.Write([]byte(`[{"id":8,"episodeFileId":7,"airDate":"2020-01-01"}]`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	probed := false
+	service := &Service{
+		config: Config{DryRun: true},
+		log:    slog.Default(),
+		probeFn: func(context.Context, string) (Validation, error) {
+			probed = true
+			return Validation{Valid: true}, nil
+		},
+	}
+	payload := WebhookPayload{
+		EventType:   "Download",
+		DownloadID:  "download-id",
+		Series:      &Series{ID: 3, Year: 1920},
+		EpisodeFile: &WebhookFile{ID: 7},
+	}
+	if err := service.processWebhook(context.Background(), testArrClient("sonarr", server.URL), payload); err != nil {
+		t.Fatal(err)
+	}
+	if !probed {
+		t.Fatal("webhook subtitle guard skipped a modern episode of an old series")
+	}
+}
+
 func TestDryRunDoesNotMutateRetryStateOrCallArr(t *testing.T) {
 	file := MediaFile{ID: 7, MovieID: 3, RelativePath: "Movie.mkv", Path: "Movie.mkv"}
 	key := retryKey("radarr", file, nil, file.RelativePath)

@@ -80,6 +80,36 @@ func TestArrClientEpisodeIDsForFile(t *testing.T) {
 	}
 }
 
+func TestArrClientListSonarrFilesUsesLatestEpisodeReleaseYear(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/series":
+			_, _ = w.Write([]byte(`[{"id":42,"year":1920,"path":"/media/Show"}]`))
+		case "/api/v3/episodefile":
+			if r.URL.Query().Get("seriesId") != "42" {
+				t.Fatalf("episode file query = %q", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`[{"id":7,"seriesId":42,"relativePath":"S01E01-E02.mkv"}]`))
+		case "/api/v3/episode":
+			if r.URL.Query().Get("seriesId") != "42" {
+				t.Fatalf("episode query = %q", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`[{"id":10,"episodeFileId":7,"airDate":"1920-01-01"},{"id":11,"episodeFileId":7,"airDate":"1980-01-01"}]`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	files, err := testArrClient("sonarr", server.URL).ListSubtitleGuardFiles(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Year != 1980 {
+		t.Fatalf("Sonarr file years = %#v, want latest episode year 1980", files)
+	}
+}
+
 func TestArrClientRemediationRequests(t *testing.T) {
 	type request struct {
 		method string

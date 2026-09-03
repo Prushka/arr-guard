@@ -95,12 +95,23 @@ func (c *ArrClient) Test(ctx context.Context) error {
 
 func (c *ArrClient) ListLibraryFiles(ctx context.Context) ([]MediaFile, error) {
 	if c.Kind() == "sonarr" {
-		return c.listSonarrFiles(ctx)
+		return c.listSonarrFiles(ctx, false)
 	}
 	return c.listRadarrFiles(ctx)
 }
 
-func (c *ArrClient) listSonarrFiles(ctx context.Context) ([]MediaFile, error) {
+// ListSubtitleGuardFiles includes Sonarr episode release dates so the subtitle
+// guard can exclude only episode files whose contained episodes are all old
+// enough for the silent-media exclusion. Unmatched scans deliberately use
+// ListLibraryFiles instead because they only need Arr media-file paths.
+func (c *ArrClient) ListSubtitleGuardFiles(ctx context.Context) ([]MediaFile, error) {
+	if c.Kind() == "sonarr" {
+		return c.listSonarrFiles(ctx, true)
+	}
+	return c.listRadarrFiles(ctx)
+}
+
+func (c *ArrClient) listSonarrFiles(ctx context.Context, includeEpisodeReleaseYears bool) ([]MediaFile, error) {
 	var series []Series
 	if err := c.do(ctx, http.MethodGet, c.apiPath("series"), nil, nil, &series); err != nil {
 		return nil, err
@@ -112,9 +123,21 @@ func (c *ArrClient) listSonarrFiles(ctx context.Context) ([]MediaFile, error) {
 		if err := c.do(ctx, http.MethodGet, c.apiPath("episodefile"), query, nil, &group); err != nil {
 			return nil, fmt.Errorf("list files for series %d: %w", item.ID, err)
 		}
+		releaseYears := map[int]int(nil)
+		if includeEpisodeReleaseYears {
+			episodes, err := c.sonarrEpisodes(ctx, item.ID)
+			if err != nil {
+				return nil, fmt.Errorf("list episodes for series %d: %w", item.ID, err)
+			}
+			releaseYears = latestEpisodeReleaseYearByFile(episodes)
+		}
 		for i := range group {
 			group[i].ParentID = item.ID
-			if group[i].Year == 0 {
+			if releaseYear := releaseYears[group[i].ID]; releaseYear > 0 {
+				// A multi-episode file must remain guarded when it contains any
+				// episode that is not old enough for the silent-media exclusion.
+				group[i].Year = releaseYear
+			} else if group[i].Year == 0 {
 				group[i].Year = item.Year
 			}
 			if group[i].Path == "" {
@@ -124,6 +147,42 @@ func (c *ArrClient) listSonarrFiles(ctx context.Context) ([]MediaFile, error) {
 		files = append(files, group...)
 	}
 	return files, nil
+}
+
+func (c *ArrClient) sonarrEpisodes(ctx context.Context, seriesID int) ([]Episode, error) {
+	query := url.Values{"seriesId": {strconv.Itoa(seriesID)}}
+	var episodes []Episode
+	if err := c.do(ctx, http.MethodGet, c.apiPath("episode"), query, nil, &episodes); err != nil {
+		return nil, err
+	}
+	return episodes, nil
+}
+
+func latestEpisodeReleaseYearByFile(episodes []Episode) map[int]int {
+	years := make(map[int]int)
+	for _, episode := range episodes {
+		if episode.EpisodeFileID < 1 {
+			continue
+		}
+		if releaseYear := episode.ReleaseYear(); releaseYear > years[episode.EpisodeFileID] {
+			years[episode.EpisodeFileID] = releaseYear
+		}
+	}
+	return years
+}
+
+func (c *ArrClient) EpisodeReleaseYearForFile(ctx context.Context, seriesID, fileID int) (int, error) {
+	if c.Kind() != "sonarr" {
+		return 0, errors.New("episode release year is only available for Sonarr")
+	}
+	if seriesID < 1 || fileID < 1 {
+		return 0, errors.New("series ID and episode file ID are required")
+	}
+	episodes, err := c.sonarrEpisodes(ctx, seriesID)
+	if err != nil {
+		return 0, err
+	}
+	return latestEpisodeReleaseYearByFile(episodes)[fileID], nil
 }
 
 func (c *ArrClient) listRadarrFiles(ctx context.Context) ([]MediaFile, error) {
@@ -173,9 +232,8 @@ func (c *ArrClient) EpisodeIDsForFile(ctx context.Context, seriesID, fileID int)
 	if seriesID < 1 || fileID < 1 {
 		return nil, fmt.Errorf("series ID and episode file ID are required")
 	}
-	query := url.Values{"seriesId": {strconv.Itoa(seriesID)}}
-	var episodes []Episode
-	if err := c.do(ctx, http.MethodGet, c.apiPath("episode"), query, nil, &episodes); err != nil {
+	episodes, err := c.sonarrEpisodes(ctx, seriesID)
+	if err != nil {
 		return nil, err
 	}
 	ids := make([]int, 0)
