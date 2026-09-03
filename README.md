@@ -130,8 +130,11 @@ skipped because Arr has no release identity to mark failed. Files found by the
 ```powershell
 go test ./...
 go vet ./...
+./lint.ps1
 go run . --help  # set MODE to `serve`, `unmatched`, or `subtitles`
 ```
+
+`lint.ps1` runs the pinned `golangci-lint` release used by the project.
 
 Repository references checked for this implementation:
 

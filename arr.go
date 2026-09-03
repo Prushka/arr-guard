@@ -65,7 +65,9 @@ func (c *ArrClient) do(ctx context.Context, method, endpoint string, query url.V
 	if err != nil {
 		return fmt.Errorf("%s %s: %w", method, requestURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		message, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		return fmt.Errorf("%s %s: HTTP %d: %s", method, requestURL, resp.StatusCode, strings.TrimSpace(string(message)))
@@ -279,7 +281,7 @@ func (c *ArrClient) SearchEpisodes(ctx context.Context, subjectID int, episodeID
 	command := CommandRequest{}
 	if c.Kind() == "sonarr" {
 		if len(episodeIDs) == 0 {
-			return errors.New("Sonarr episode search requires at least one episode ID")
+			return errors.New("sonarr episode search requires at least one episode ID")
 		}
 		command.Name = "EpisodeSearch"
 		command.EpisodeIDs = episodeIDs

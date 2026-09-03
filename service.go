@@ -253,10 +253,10 @@ func (s *Service) recoverBlockedQueueItem(ctx context.Context, client *ArrClient
 	}
 	if client.Kind() == "radarr" {
 		if item.MovieID < 1 {
-			return errors.New("Radarr queue item movie ID is missing")
+			return errors.New("radarr queue item movie ID is missing")
 		}
 	} else if item.EpisodeID < 1 {
-		return errors.New("Sonarr queue item episode ID is missing")
+		return errors.New("sonarr queue item episode ID is missing")
 	}
 
 	s.log.Warn("blocked queue item requires regrab", "arr", client.Kind(), "queue_id", item.ID, "download_id", item.DownloadID, "movie_id", item.MovieID, "series_id", item.SeriesID, "episode_id", item.EpisodeID, "dry_run", s.config.DryRun)
@@ -711,14 +711,6 @@ func historyData(record HistoryRecord, key string) string {
 	return ""
 }
 
-func (s *Service) validateAndRemediate(ctx context.Context, client *ArrClient, file MediaFile, downloadID string) error {
-	return s.validateAndRemediateWithHistory(ctx, client, file, downloadID, 0, nil)
-}
-
-func (s *Service) validateAndRemediateWithHistory(ctx context.Context, client *ArrClient, file MediaFile, downloadID string, importedHistoryID int, searchEpisodeIDs []int) error {
-	return s.validateAndRemediateWithHistoryOptions(ctx, client, file, downloadID, importedHistoryID, searchEpisodeIDs, false)
-}
-
 func (s *Service) validateAndRemediateWithHistoryOptions(ctx context.Context, client *ArrClient, file MediaFile, downloadID string, importedHistoryID int, searchEpisodeIDs []int, resolveEpisodesForValid bool) error {
 	validation, pathOnDisk, err := s.validate(ctx, file)
 	if err != nil {
@@ -765,7 +757,7 @@ func (s *Service) applyValidationOptions(ctx context.Context, client *ArrClient,
 			s.log.Warn("could not resolve Sonarr episodes for valid file; resetting path retry state only", "file_id", file.ID, "error", err)
 		}
 		if !validation.Valid && len(searchEpisodeIDs) == 0 {
-			return fmt.Errorf("Sonarr file %d is not assigned to an episode; refusing broad series search", file.ID)
+			return fmt.Errorf("sonarr file %d is not assigned to an episode; refusing broad series search", file.ID)
 		}
 	}
 	relativePath := file.RelativePath
