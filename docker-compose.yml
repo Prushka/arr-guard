@@ -7,6 +7,8 @@ services:
       - .env
     environment:
       MODE: ${MODE:-serve}
+      DRY_RUN: ${DRY_RUN:-true}
+      RECOVER_BLOCKED_QUEUE: ${RECOVER_BLOCKED_QUEUE:-false}
       LISTEN_ADDR: ":8080"
       FFPROBE_PATH: "/usr/local/bin/ffprobe"
       UNMATCHED_PATH: "/var/lib/arr-guard/unmatched.json"

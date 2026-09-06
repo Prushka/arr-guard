@@ -25,37 +25,6 @@ func TestWebhookPayloadFiles(t *testing.T) {
 	}
 }
 
-func TestEpisodeIDs(t *testing.T) {
-	payload := WebhookPayload{Episodes: []Episode{{ID: 10}, {}, {ID: 12}}}
-	if got := episodeIDs(payload); len(got) != 2 || got[0] != 10 || got[1] != 12 {
-		t.Fatalf("episode IDs = %#v", got)
-	}
-}
-
-func TestEpisodeIDsForFileUsesFileMapping(t *testing.T) {
-	payload := WebhookPayload{
-		EpisodeFiles: []WebhookFile{{ID: 7}, {ID: 8}},
-		Episodes: []Episode{
-			{ID: 10, EpisodeFileID: 7},
-			{ID: 11, EpisodeFileID: 8},
-			{ID: 12, EpisodeFileID: 7},
-		},
-	}
-	if got := episodeIDsForFile(payload, 7); !equalInts(got, []int{10, 12}) {
-		t.Fatalf("episode IDs for file = %#v", got)
-	}
-}
-
-func TestEpisodeIDsForFileSingleFileFallback(t *testing.T) {
-	payload := WebhookPayload{
-		EpisodeFile: &WebhookFile{ID: 7},
-		Episodes:    []Episode{{ID: 10}, {ID: 12}},
-	}
-	if got := episodeIDsForFile(payload, 7); !equalInts(got, []int{10, 12}) {
-		t.Fatalf("episode IDs for single file = %#v", got)
-	}
-}
-
 func TestOldUnknownSubtitleGrace(t *testing.T) {
 	now := time.Now()
 	validation := Validation{HasSubtitles: true, HasUnknownLanguage: true, Reason: "no English subtitle stream or sidecar"}
@@ -104,6 +73,10 @@ func TestAuditSkipsSilentMediaBeforeProbe(t *testing.T) {
 
 func TestWebhookSkipsSilentMovieBeforeProbe(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v3/movie/3" {
+			_ = json.NewEncoder(w).Encode(Movie{ID: 3, Year: time.Now().Year() - 51})
+			return
+		}
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v3/moviefile/7" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -146,7 +119,7 @@ func TestWebhookUsesEpisodeReleaseYearForSilentMediaSkip(t *testing.T) {
 			if r.Method != http.MethodGet || r.URL.Query().Get("seriesId") != "3" {
 				t.Fatalf("episode request = %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
 			}
-			_, _ = w.Write([]byte(`[{"id":8,"episodeFileId":7,"airDate":"1920-01-01"}]`))
+			_, _ = w.Write([]byte(`[{"id":8,"seriesId":3,"episodeFileId":7,"airDate":"1920-01-01"}]`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -176,34 +149,22 @@ func TestWebhookUsesEpisodeReleaseYearForSilentMediaSkip(t *testing.T) {
 }
 
 func TestWebhookDoesNotSkipModernEpisodeOfOldSeries(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v3/episodefile/7":
-			_, _ = w.Write([]byte(`{"id":7,"seriesId":3,"path":"/media/Show/S01E01.mkv"}`))
-		case "/api/v3/episode":
-			_, _ = w.Write([]byte(`[{"id":8,"episodeFileId":7,"airDate":"2020-01-01"}]`))
-		default:
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	defer server.Close()
-
+	f := newSafetyFixture(t, "sonarr")
+	f.service.config.DryRun = true
+	f.history = []HistoryRecord{{ID: 1, SeriesID: 3, DownloadID: "download-id", EventType: "downloadFolderImported", Data: map[string]string{"fileId": "17"}}}
+	f.validation.Valid = true
 	probed := false
-	service := &Service{
-		config: Config{DryRun: true},
-		log:    slog.Default(),
-		probeFn: func(context.Context, string) (Validation, error) {
-			probed = true
-			return Validation{Valid: true}, nil
-		},
+	f.service.probeFn = func(context.Context, string) (Validation, error) {
+		probed = true
+		return f.validation, nil
 	}
 	payload := WebhookPayload{
 		EventType:   "Download",
 		DownloadID:  "download-id",
 		Series:      &Series{ID: 3, Year: 1920},
-		EpisodeFile: &WebhookFile{ID: 7},
+		EpisodeFile: &WebhookFile{ID: 17},
 	}
-	if err := service.processWebhook(context.Background(), testArrClient("sonarr", server.URL), payload); err != nil {
+	if err := f.service.processWebhook(t.Context(), f.client, payload); err != nil {
 		t.Fatal(err)
 	}
 	if !probed {
@@ -211,30 +172,33 @@ func TestWebhookDoesNotSkipModernEpisodeOfOldSeries(t *testing.T) {
 	}
 }
 
-func TestDryRunDoesNotMutateRetryStateOrCallArr(t *testing.T) {
-	file := MediaFile{ID: 7, MovieID: 3, RelativePath: "Movie.mkv", Path: "Movie.mkv"}
-	key := retryKey("radarr", file, nil, file.RelativePath)
-	store := &StateStore{state: State{Attempts: map[string]int{key: 2}}}
-	service := &Service{
-		config: Config{DryRun: true, MaxAttempts: 3},
-		log:    slog.Default(),
-		state:  store,
-	}
-	client := testArrClient("radarr", "http://arr.invalid")
-
-	if err := service.applyValidation(context.Background(), client, file, Validation{Valid: true}, file.Path, "", 0, nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := store.Attempts(key); got != 2 {
-		t.Fatalf("valid dry-run changed retry attempts to %d", got)
-	}
-
-	invalid := Validation{Reason: "no subtitles"}
-	if err := service.applyValidation(context.Background(), client, file, invalid, file.Path, "download-id", 1, nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := store.Attempts(key); got != 2 {
-		t.Fatalf("invalid dry-run changed retry attempts to %d", got)
+func TestDryRunDoesNotMutateRetryStateOrCallArrMutations(t *testing.T) {
+	for _, kind := range []string{"sonarr", "radarr"} {
+		f := newSafetyFixture(t, kind)
+		f.service.config.DryRun = true
+		keys := retryKeys(kind, f.file, []int{10, 12})
+		for _, key := range keys {
+			if _, err := f.service.state.Increment(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+		before, err := os.ReadFile(f.service.state.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, valid := range []bool{false, true} {
+			f.validation.Valid = valid
+			if err := f.apply(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		after, err := os.ReadFile(f.service.state.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) || len(f.mutations) != 0 {
+			t.Fatal("dry-run mutated state or Arr")
+		}
 	}
 }
 
@@ -261,38 +225,22 @@ func TestRetryKeyUsesStableRadarrMovieID(t *testing.T) {
 }
 
 func TestValidSonarrWebhookStyleResetClearsEpisodeAndLegacyPathKeys(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/v3/episode" || r.URL.Query().Get("seriesId") != "42" {
-			t.Fatalf("unexpected request %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+	f := newSafetyFixture(t, "sonarr")
+	keys := retryKeys("sonarr", f.file, []int{10, 12})
+	keys = append(keys, retryKey("sonarr", f.file, []int{10, 12}, f.file.RelativePath), retryKey("sonarr", f.file, nil, f.file.RelativePath))
+	for _, key := range keys {
+		if _, err := f.service.state.Increment(key); err != nil {
+			t.Fatal(err)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"id":314,"episodeFileId":7}]`))
-	}))
-	defer server.Close()
-
-	store, err := LoadStateStore(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
+	}
+	f.validation.Valid = true
+	if err := f.apply(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	file := MediaFile{ID: 7, ParentID: 42, RelativePath: "Show - S01E01.mkv", Path: "Show - S01E01.mkv"}
-	episodeKey := retryKey("sonarr", file, []int{314}, file.RelativePath)
-	legacyKey := retryKey("sonarr", file, nil, file.RelativePath)
-	if _, err := store.Increment(episodeKey); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Increment(legacyKey); err != nil {
-		t.Fatal(err)
-	}
-
-	service := &Service{config: Config{DryRun: false}, log: slog.Default(), state: store}
-	if err := service.applyValidationOptions(context.Background(), testArrClient("sonarr", server.URL), file, Validation{Valid: true}, file.Path, "", 0, nil, true); err != nil {
-		t.Fatal(err)
-	}
-	if got := store.Attempts(episodeKey); got != 0 {
-		t.Fatalf("episode retry attempts = %d, want 0", got)
-	}
-	if got := store.Attempts(legacyKey); got != 0 {
-		t.Fatalf("legacy retry attempts = %d, want 0", got)
+	for _, key := range keys {
+		if got := f.service.state.Attempts(key); got != 0 {
+			t.Fatalf("retry attempts for %s = %d, want 0", key, got)
+		}
 	}
 }
 
@@ -375,113 +323,41 @@ func TestWebhookHandlerBasicAuth(t *testing.T) {
 	}
 }
 
-func TestRecoverBlockedQueueRadarrRemovesBlocklistsAndSearches(t *testing.T) {
-	var requests []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/queue":
-			requests = append(requests, "queue")
-			_, _ = w.Write([]byte(`{"records":[
-                {"id":1,"downloadId":"active","movieId":12,"status":"downloading","trackedDownloadStatus":"ok","trackedDownloadState":"downloading"},
-                {"id":23,"downloadId":"blocked","movieId":91,"status":"completed","trackedDownloadStatus":"warning","trackedDownloadState":"importBlocked","statusMessages":[{"title":"Unable to Import Automatically","messages":["Manual import required"]}]}
-            ]}`))
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/v3/queue/23":
-			requests = append(requests, "fail")
-			if r.URL.Query().Get("removeFromClient") != "true" || r.URL.Query().Get("blocklist") != "true" || r.URL.Query().Get("skipRedownload") != "true" {
-				t.Fatalf("queue recovery query = %s", r.URL.RawQuery)
+func TestRecoverBlockedQueueGroupsDownloadAndLimitsSearches(t *testing.T) {
+	for _, kind := range []string{"sonarr", "radarr"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newSafetyFixture(t, kind)
+			f.deleted = true // blocked imports have no managed file yet
+			f.queue = []QueueRecord{{ID: 7, DownloadID: "blocked", MovieID: 3, SeriesID: 3, EpisodeID: 10, Status: "completed", TrackedDownloadState: "importBlocked"}}
+			if kind == "sonarr" {
+				second := f.queue[0]
+				second.ID = 8
+				second.EpisodeID = 12
+				f.queue = append(f.queue, second)
 			}
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/command":
-			requests = append(requests, "search")
-			var command CommandRequest
-			if err := json.NewDecoder(r.Body).Decode(&command); err != nil {
+			if err := f.service.recoverBlockedQueue(t.Context(), f.client); err != nil {
 				t.Fatal(err)
 			}
-			if command.Name != "MoviesSearch" || !equalInts(command.MovieIDs, []int{91}) {
-				t.Fatalf("movie search command = %#v", command)
+			if len(f.mutations) != 2 || len(f.commands) != 1 {
+				t.Fatalf("actions = %v", f.mutations)
 			}
-			w.WriteHeader(http.StatusCreated)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	service := &Service{
-		config: Config{StatePath: filepath.Join(t.TempDir(), "state.json")},
-		log:    slog.Default(),
-	}
-	store, err := LoadStateStore(service.config.StatePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service.state = store
-	client := testArrClient("radarr", server.URL)
-	if err := service.recoverBlockedQueue(context.Background(), client); err != nil {
-		t.Fatal(err)
-	}
-	if got, want := strings.Join(requests, ","), "queue,fail,search"; got != want {
-		t.Fatalf("request order = %q, want %q", got, want)
-	}
-}
-
-func TestRecoverBlockedQueueSonarrSearchesOnlyEpisode(t *testing.T) {
-	var requests []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/queue":
-			requests = append(requests, "queue")
-			_, _ = w.Write([]byte(`{"records":[{"id":7,"downloadId":"blocked","seriesId":42,"episodeId":314,"status":"completed","trackedDownloadState":"importBlocked"}]}`))
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/v3/queue/7":
-			requests = append(requests, "fail")
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/command":
-			requests = append(requests, "search")
-			var command CommandRequest
-			if err := json.NewDecoder(r.Body).Decode(&command); err != nil {
-				t.Fatal(err)
+			if kind == "sonarr" && !equalInts(f.commands[0].EpisodeIDs, []int{10, 12}) {
+				t.Fatal("shared download was not fully searched")
 			}
-			if command.Name != "EpisodeSearch" || !equalInts(command.EpisodeIDs, []int{314}) || command.SeriesID != 0 {
-				t.Fatalf("episode search command = %#v", command)
-			}
-			w.WriteHeader(http.StatusCreated)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	service := &Service{config: Config{StatePath: filepath.Join(t.TempDir(), "state.json")}, log: slog.Default()}
-	store, err := LoadStateStore(service.config.StatePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service.state = store
-	if err := service.recoverBlockedQueue(context.Background(), testArrClient("sonarr", server.URL)); err != nil {
-		t.Fatal(err)
-	}
-	if got, want := strings.Join(requests, ","), "queue,fail,search"; got != want {
-		t.Fatalf("request order = %q, want %q", got, want)
+		})
 	}
 }
 
 func TestRecoverBlockedQueueDryRunDoesNotMutate(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/v3/queue" {
-			t.Fatalf("dry-run made mutating request %s %s", r.Method, r.URL.Path)
-		}
-		_, _ = w.Write([]byte(`{"records":[{"id":7,"movieId":91,"status":"completed","trackedDownloadState":"importBlocked"}]}`))
-	}))
-	defer server.Close()
-
-	service := &Service{config: Config{DryRun: true, StatePath: filepath.Join(t.TempDir(), "state.json")}, log: slog.Default()}
-	store, err := LoadStateStore(service.config.StatePath)
-	if err != nil {
+	f := newSafetyFixture(t, "radarr")
+	f.service.config.DryRun = true
+	f.deleted = true
+	f.queue = []QueueRecord{{ID: 7, DownloadID: "blocked", MovieID: 3, Status: "completed", TrackedDownloadState: "importBlocked"}}
+	if err := f.service.recoverBlockedQueue(t.Context(), f.client); err != nil {
 		t.Fatal(err)
 	}
-	service.state = store
-	if err := service.recoverBlockedQueue(context.Background(), testArrClient("radarr", server.URL)); err != nil {
-		t.Fatal(err)
+	if len(f.mutations) > 0 || len(f.service.state.Pending()) > 0 {
+		t.Fatal("queue dry run mutated state")
 	}
 }
 
@@ -692,116 +568,6 @@ func TestScanUnmatchedWritesAllOrphansWithoutProbing(t *testing.T) {
 		if file.Path == paths["excluded"] || file.Path == paths["matched"] {
 			t.Fatalf("unexpected path in orphan report: %#v", file)
 		}
-	}
-}
-
-func TestInvalidMatchedFileWithoutHistoryIsSearchedWithoutBlocklist(t *testing.T) {
-	requests := make(chan string, 10)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests <- r.Method + " " + r.URL.Path
-		switch {
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/v3/moviefile/17":
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/command":
-			var command CommandRequest
-			if err := json.NewDecoder(r.Body).Decode(&command); err != nil {
-				t.Fatal(err)
-			}
-			if command.Name != "MoviesSearch" || !equalInts(command.MovieIDs, []int{3}) {
-				t.Fatalf("command = %#v", command)
-			}
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	defer server.Close()
-
-	store, err := LoadStateStore(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := &Service{
-		config: Config{DryRun: false, MaxAttempts: 3},
-		log:    slog.Default(),
-		state:  store,
-	}
-	file := MediaFile{ID: 17, MovieID: 3, RelativePath: "Movie.mkv", Path: "Movie.mkv"}
-	if err := service.applyValidation(context.Background(), testArrClient("radarr", server.URL), file, Validation{Reason: "no subtitles"}, file.Path, "", 0, nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := len(requests); got != 2 {
-		t.Fatalf("request count = %d, want delete and search only", got)
-	}
-	for i := 0; i < 2; i++ {
-		if got := <-requests; got == "GET /api/v3/queue" || got == "POST /api/v3/history/failed/" {
-			t.Fatalf("unexpected blocklist request %q", got)
-		}
-	}
-}
-
-func TestPendingRemediationCleanupRetriesPostDeleteWork(t *testing.T) {
-	var queueCalls, searchCalls, queueDeleteCalls int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/v3/moviefile/17":
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/queue":
-			queueCalls++
-			if queueCalls == 1 {
-				http.Error(w, "temporary queue failure", http.StatusBadGateway)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"records":[{"id":77,"downloadId":"download-1","movieId":3,"status":"completed"}],"totalRecords":1}`))
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/v3/queue/77":
-			queueDeleteCalls++
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/command":
-			searchCalls++
-			if searchCalls == 1 {
-				http.Error(w, "temporary search failure", http.StatusBadGateway)
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	store, err := LoadStateStore(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := &Service{
-		config: Config{DryRun: false, MaxAttempts: 3},
-		log:    slog.Default(),
-		state:  store,
-	}
-	file := MediaFile{ID: 17, MovieID: 3, RelativePath: "Movie.mkv", Path: "Movie.mkv"}
-	client := testArrClient("radarr", server.URL)
-	if err := service.applyValidation(context.Background(), client, file, Validation{Reason: "no subtitles"}, file.Path, "download-1", 0, nil); err == nil {
-		t.Fatal("applyValidation unexpectedly succeeded despite post-delete API failures")
-	}
-	service.pendingMu.Lock()
-	pendingCount := len(service.pending)
-	service.pendingMu.Unlock()
-	if pendingCount != 1 {
-		t.Fatalf("pending remediations = %d, want 1", pendingCount)
-	}
-
-	if err := service.CleanupPending(context.Background()); err != nil {
-		t.Fatalf("CleanupPending() error = %v", err)
-	}
-	if queueCalls != 2 || queueDeleteCalls != 1 || searchCalls != 2 {
-		t.Fatalf("cleanup calls: queue=%d queueDelete=%d search=%d, want 2, 1, 2", queueCalls, queueDeleteCalls, searchCalls)
-	}
-	service.pendingMu.Lock()
-	defer service.pendingMu.Unlock()
-	if len(service.pending) != 0 {
-		t.Fatalf("pending remediations remain after successful cleanup: %#v", service.pending)
 	}
 }
 

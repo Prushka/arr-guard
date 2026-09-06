@@ -17,7 +17,6 @@ func TestArrClientSearchCommands(t *testing.T) {
 		episodeIDs []int
 		want       CommandRequest
 	}{
-		{kind: "sonarr", want: CommandRequest{Name: "SeriesSearch", SeriesID: 42}},
 		{kind: "sonarr", episodeIDs: []int{10, 11}, want: CommandRequest{Name: "EpisodeSearch", EpisodeIDs: []int{10, 11}}},
 		{kind: "radarr", want: CommandRequest{Name: "MoviesSearch", MovieIDs: []int{42}}},
 	}
@@ -42,12 +41,7 @@ func TestArrClientSearchCommands(t *testing.T) {
 			defer server.Close()
 
 			client := testArrClient(test.kind, server.URL)
-			var err error
-			if test.kind == "sonarr" && len(test.episodeIDs) == 0 {
-				err = client.SearchSeries(context.Background(), 42)
-			} else {
-				err = client.SearchEpisodes(context.Background(), 42, test.episodeIDs)
-			}
+			err := client.SearchEpisodes(context.Background(), 42, test.episodeIDs)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -67,7 +61,7 @@ func TestArrClientEpisodeIDsForFile(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v3/episode" || r.URL.Query().Get("seriesId") != "42" {
 			t.Fatalf("request = %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`[{"id":10,"episodeFileId":7},{"id":11,"episodeFileId":8},{"id":12,"episodeFileId":7}]`))
+		_, _ = w.Write([]byte(`[{"id":10,"seriesId":42,"episodeFileId":7},{"id":11,"seriesId":42,"episodeFileId":8},{"id":12,"seriesId":42,"episodeFileId":7}]`))
 	}))
 	defer server.Close()
 	client := testArrClient("sonarr", server.URL)
@@ -94,7 +88,7 @@ func TestArrClientListSonarrFilesUsesLatestEpisodeReleaseYear(t *testing.T) {
 			if r.URL.Query().Get("seriesId") != "42" {
 				t.Fatalf("episode query = %q", r.URL.RawQuery)
 			}
-			_, _ = w.Write([]byte(`[{"id":10,"episodeFileId":7,"airDate":"1920-01-01"},{"id":11,"episodeFileId":7,"airDate":"1980-01-01"}]`))
+			_, _ = w.Write([]byte(`[{"id":10,"seriesId":42,"episodeFileId":7,"airDate":"1920-01-01"},{"id":11,"seriesId":42,"episodeFileId":7,"airDate":"1980-01-01"}]`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}

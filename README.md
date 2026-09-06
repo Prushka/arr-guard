@@ -88,54 +88,147 @@ Create one Webhook connection in each Arr instance:
 - Authentication: set Sonarr/Radarr's Webhook `Username` and `Password` fields to `WEBHOOK_USERNAME` and `WEBHOOK_PASSWORD`. The sidecar also accepts `X-Webhook-Token: <WEBHOOK_TOKEN>` or `Authorization: Bearer <WEBHOOK_TOKEN>` when `WEBHOOK_TOKEN` is configured.
 - Enable the `On Download` event. In Sonarr, `On Import Complete` may also be enabled to cover batch imports; both payload shapes are supported. `Grab` is not needed.
 
-The handler acknowledges quickly and processes work in a bounded queue. Duplicate webhook deliveries are serialized per media-file ID.
+In write-enabled mode the handler persists a minimal job before acknowledging HTTP 202. It processes jobs in a bounded worker queue, retries read/probe failures up to five times with exponential backoff, and retains exhausted jobs for review. Duplicate deliveries are serialized by media-file ID. Dry-run serving uses an in-memory queue and never writes retry state.
 
-While running with `MODE=serve`, the sidecar also checks each configured Arr
-queue at startup and once per hour. It selects only completed items whose
-tracked download state is `importBlocked` or whose status text says they are
-unable to import automatically. For each matching Radarr item it removes and
-blocklists the queue entry, removes it from the download client, and starts a
-movie search. For Sonarr, the replacement search is limited to the affected
-queue episode ID. The queue check makes only one queue request per Arr instance
-per pass and does not inspect media files.
+Queue recovery is disabled by default. Set `RECOVER_BLOCKED_QUEUE=true` to inspect
+blocked completed downloads at startup and hourly in `MODE=serve`. This is a
+separate policy: an import can be blocked by a permissions problem or a valid
+release needing manual selection, so review dry-run output before opting in.
+
+Recovery uses paginated queue reads, groups all entries sharing a download ID,
+and rechecks their state. Every entry must still be blocked, belong to the same
+subject, and have no managed replacement. One queue removal/blocklist is followed
+by a movie search or an episode search covering all affected queue episodes.
+`MAX_ATTEMPTS` applies to this path too. A failed removal is never inferred to
+have succeeded merely because its queue entry disappeared.
 
 ## Remediation behavior
 
-1. Skip movies and episode files released more than 50 years ago before probing or making remediation calls. For Sonarr, the most recent contained episode air date is used, so a multi-episode file remains guarded when it contains a newer episode. This avoids rejecting silent-era media that cannot contain subtitle streams by nature.
-2. Probe the managed file. Any ffprobe stream with `codec_type=subtitle` is supported regardless of `codec_name`, including embedded SubRip/SRT, ASS/SSA, WebVTT, MicroDVD/SUB, DVD bitmap/SUP, PGS, and other codecs exposed by ffprobe. Matching sidecars next to the media are also recognized for `.srt`, `.ass`, `.ssa`, `.vtt`, `.sub`, `.idx`, `.sup`, `.pgs`, `.smi`, `.sami`, `.mpl2`, `.ttml`, `.dfxp`, `.usf`, `.scc`, `.stl`, and `.mks` (for example, `Movie.en.srt`). A stream's language/title metadata or a sidecar filename containing `en`, `eng`, `en-US`, or `English` counts as English; an untagged or unrecognized language is recorded as unidentified. Image subtitles are detected from their ffprobe stream and language metadata or sidecar filename; the guard does not OCR subtitle pixels, so an unidentified image stream follows the existing unidentified-language/10-year grace rule rather than being guessed.
-3. If subtitles exist but every language is non-English/unidentified, media whose Arr year is more than 10 years old is treated as valid. Media with no subtitles is never accepted by this grace rule.
-4. If invalid, delete the managed media file through `/api/v3/episodefile/{id}` or `/api/v3/moviefile/{id}`.
-5. If the originating download is known, remove/blocklist it through the queue API, or mark its grabbed history failed. This emits Arr's normal failed-download event.
-6. Submit `EpisodeSearch` only for the affected Sonarr episode IDs; the sidecar resolves `episodeFileId` through `/api/v3/episode` during `subtitles` scans when a webhook does not include episodes. If that mapping cannot be established, it refuses deletion/search instead of broadening to a whole-series search. Radarr uses `MoviesSearch`. These explicit searches run even when Arr automatic failed-download redownload is disabled.
-7. Persist attempts in `STATE_PATH`. Sonarr retries key by affected episode IDs and Radarr retries by movie. After `MAX_ATTEMPTS`, the invalid file is deleted but another automatic search is not started. This prevents a release/indexer that repeatedly lacks subtitles from looping forever.
-8. If deletion succeeds but a later blocklist/failure or replacement-search call fails, the unfinished operation is retained in memory and retried during graceful program shutdown (with a two-minute cleanup window). A forced kill or host failure cannot run this cleanup.
+1. Read authoritative file ownership, paths, and release dates from Arr. Webhook
+   paths, download IDs, episode IDs, and dates are not trusted for remediation.
+   Skip media older than 50 years. Sonarr uses the newest episode in a file;
+   an unknown episode date prevents the age exclusion. This is an age policy,
+   not an assertion that all older media is silent or cannot have subtitles.
+2. Probe the nonempty local file with ffprobe and inspect matching subtitle
+   sidecars. All embedded codecs reported as `codec_type=subtitle` are supported,
+   including bitmap subtitles. Sidecars support `.srt`, `.ass`, `.ssa`, `.vtt`,
+   `.sub`, `.idx`, `.sup`, `.pgs`, `.smi`, `.sami`, `.mpl2`, `.ttml`, `.dfxp`,
+   `.usf`, `.scc`, `.stl`, and `.mks`. Empty/nonregular matching sidecars stop
+   validation, allowing incomplete imports to finish. Image pixels are not OCR'd;
+   stream language/title metadata and sidecar filenames determine language.
+   Error-level ffprobe diagnostics stop validation even when the process exits
+   successfully; malformed output, cancellation, and timeouts also stop it.
+3. Accept English subtitles (`en`, `eng`, `en-US`, `English`). For media more than
+   ten years old, at least one unidentified subtitle language also qualifies.
+   Known non-English subtitles alone do not qualify for that grace rule, and
+   media with no subtitles is never accepted by it.
+4. Before deletion, resolve import history and the full current Sonarr episode
+   mapping. Failed history reads, ambiguous identity, changed media, incomplete
+   imports, and unassigned files stop remediation. A queued download is left
+   untouched until Arr reports it fully imported; queued Sonarr episodes must
+   all have managed files. Old/manual files with no
+   import history can still be rejected and searched, without blocklisting.
+5. Queue failure uses `skipRedownload=true`. History failure uses a confirmed
+   grabbed record and requires **both** Arr settings `autoRedownloadFailed` and
+   `autoRedownloadFailedFromInteractiveSearch` to be false. Its v3 endpoint cannot
+   suppress Arr's independent redownload behavior. The guard reads those settings;
+   it never changes them. Unsafe/unknown settings stop remediation before deletion.
+   See the [Sonarr history controller](https://github.com/Sonarr/Sonarr/blob/main/src/Sonarr.Api.V3/History/HistoryController.cs)
+   and [Radarr history controller](https://github.com/Radarr/Radarr/blob/master/src/Radarr.Api.V3/History/HistoryController.cs).
+6. Serialize remediation preflights in both dry run and write mode, keeping probes
+   parallel. This avoids overlapping expensive Arr history queries, including
+   early webhook origin checks. Recheck the Arr record, local media snapshot,
+   subtitle directory, and episode mapping. Persist an operation phase in
+   `STATE_PATH` **before** each mutation. Delete only the managed file through Arr,
+   then fail/blocklist its confirmed origin, then search the still-missing movie
+   or affected episodes. Never fall back to a series-wide search.
+7. Persist retry counters per movie or individual episode, so file renames and
+   single/combined episode releases cannot reset the limit. Valid replacements
+   clear those counters in both library scans and webhook jobs only if the media
+   and subtitle directory snapshots still match. Legacy composite
+   episode keys migrate to each episode's maximum count. Up to `MAX_ATTEMPTS`
+   replacement searches are permitted; a later invalid managed file is deleted
+   and blocklisted without another search. Queue recovery stops before removing
+   another download once its limit is reached.
 
-Sonarr's public queue/history failure endpoints identify a download, not an individual episode. The sidecar therefore scopes replacement searches to the affected episode IDs; when one download contains several episodes, Arr may block that shared release for the download as a whole, which is an API limitation.
+Sonarr's failure endpoints can blocklist an entire shared release. The sidecar
+scopes its own searches to affected episodes, but cannot make Arr's public
+failure API operate on only part of a download.
 
-For an old/manual library file with a matching Arr media-file ID but no matching
-import history, the normal rules still apply: an invalid file is deleted and
-the affected Sonarr episodes or Radarr movie are searched. Blocklisting is
-skipped because Arr has no release identity to mark failed. Files found by the
-`unmatched` scan are excluded from these remediation rules entirely.
+## Safety and recovery
 
-## Safety
+- `DRY_RUN` defaults to `true`. Set it explicitly to `false` only when you want
+  remediation. Malformed booleans and integers fail startup. Write-enabled
+  `MODE=serve` requires webhook authentication. Unmatched mode always uses a
+  read-only Arr client, even if `DRY_RUN=false`.
+- Dry run performs read/probe/preflight checks without API mutations or retry-state
+  writes. The Arr client independently rejects non-GET requests in read-only mode
+  and does not follow redirects. `unmatched` writes only its local JSON report.
+- Mount media read-only. The guard never edits local media; Arr deletion APIs can
+  still delete files through Arr's own mounts when write mode is enabled.
+- State/report paths must be distinct `.json` paths outside mapped media roots.
+  Keep state on a local durable filesystem. An exclusive OS lock protects the
+  state writer, and state is bound to the configured server URLs. Run only one
+  write-enabled deployment per Arr server, sharing its single state path; separate
+  state paths do not coordinate with each other.
+- API timeouts/errors can follow a committed mutation. An unfinished operation is
+  retained in the durable `operations` journal and blocks further remediation for
+  that subject/download. Shutdown and restart do **not** replay its mutations.
+  Persistence failure disables further state writes for that process.
+- To reconcile: stop the guard, back up its state JSON, inspect the journal's phase
+  and Arr's file/history/queue/command state, and finish or abandon the operation
+  deliberately. Remove only the reviewed operation entry, retain its attempt
+  counters, and mark its key `true` in `completed` to prevent duplicate work.
+  Exhausted `webhooks` entries remain after five failures; after fixing the cause,
+  reset that job's `failures` to `0` and remove `nextAttempt`, then restart.
+  Do not erase the entire state to clear one problem.
 
-- Set `DRY_RUN=true` to probe and log without deleting or searching.
-- Mount media read-only in this sidecar. It only probes the files; Sonarr/Radarr perform deletion in their own container when the sidecar calls the media-file API.
-- Protect the webhook endpoint with `WEBHOOK_USERNAME`/`WEBHOOK_PASSWORD` (the native Arr Webhook fields) or `WEBHOOK_TOKEN`; without either, the endpoint accepts requests from any reachable client.
-- `ffprobe` failures are non-destructive: the file is left in place and the error is logged.
-- After a successful Arr media-file deletion, graceful shutdown retries any unfinished blocklist/failure and replacement-search calls before exiting. Keep the process running long enough for the cleanup window to complete; `SIGKILL` and power loss cannot be recovered in memory.
+The Arr APIs provide no cross-request transaction or conditional file deletion.
+The rechecks narrow races with other Arr activity, but cannot eliminate changes
+made by Arr or another application in the interval between a check and mutation.
+Likewise, a power/storage failure is subject to the filesystem's durability
+support. Review the journal after any uncertain outcome.
 
 ## Development
 
 ```powershell
 go test ./...
+go test -race ./...
 go vet ./...
 ./lint.ps1
 go run . --help  # set MODE to `serve`, `unmatched`, or `subtitles`
 ```
 
 `lint.ps1` runs the pinned `golangci-lint` release used by the project.
+
+Opt-in live verification loads `.env`, forces dry run, and adds a separate
+GET-only transport with an endpoint allowlist. It never invokes server mutations.
+The full scan reads media and writes its orphan report to a local temporary
+directory; logs contain counts, numeric file IDs, and error categories rather
+than private paths:
+
+```powershell
+$env:ARR_LIVE_READ_ONLY = "1"
+go test -run '^TestLiveReadOnly$' -v -timeout 3h
+$env:ARR_LIVE_FULL_SCAN = "1"
+$env:ARR_LIVE_WEBHOOK_CHECK = "1"
+go test -run '^TestLiveReadOnly$' -v -timeout 3h
+```
+
+Mutation behavior is verified with local `httptest` servers and fault injection.
+Live-test success means the harness completed; inspect its probe-error and
+preflight-block counts to see which media or actions were refused safely.
+`ARR_LIVE_WORKERS` can set 1–8 simultaneous probes (default 4).
+`ARR_LIVE_ORIGIN_DIAGNOSTICS=1` additionally inspects imported queue groups and
+Sonarr import-history ambiguities, then probes affected candidates to explain
+safety refusals. It uses the same GET-only transport and dry-run checks.
+To retest particular Sonarr files concurrently, set `ARR_LIVE_PREFLIGHT_IDS` to
+their comma-separated numeric IDs (at most 20) and run
+`go test -run '^TestLiveTargetedPreflight$' -v -timeout 20m` with the read-only
+opt-in enabled. This uses the application's normal request deadline and logs
+slow API endpoint names without private URLs or query values.
+Real ffprobe tests generate disposable media fixtures when ffmpeg is available.
+See [AUDIT.md](AUDIT.md) for the audit's results and limitations.
 
 Repository references checked for this implementation:
 

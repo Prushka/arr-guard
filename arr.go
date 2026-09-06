@@ -17,15 +17,16 @@ import (
 )
 
 type ArrClient struct {
-	config ArrConfig
-	client *http.Client
-	log    *slog.Logger
+	config   ArrConfig
+	client   *http.Client
+	log      *slog.Logger
+	readOnly bool
 }
 
 func NewArrClient(config ArrConfig, log *slog.Logger) *ArrClient {
 	return &ArrClient{
 		config: config,
-		client: &http.Client{Timeout: 30 * time.Second},
+		client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		log:    log.With("arr", config.Name),
 	}
 }
@@ -38,6 +39,9 @@ func (c *ArrClient) apiPath(parts ...string) string {
 }
 
 func (c *ArrClient) do(ctx context.Context, method, endpoint string, query url.Values, body any, out any) error {
+	if c.readOnly && method != http.MethodGet {
+		return errors.New("read-only Arr client refuses mutation")
+	}
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -69,13 +73,22 @@ func (c *ArrClient) do(ctx context.Context, method, endpoint string, query url.V
 		_ = resp.Body.Close()
 	}()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		message, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		return fmt.Errorf("%s %s: HTTP %d: %s", method, requestURL, resp.StatusCode, strings.TrimSpace(string(message)))
+		return &ArrHTTPError{Method: method, Status: resp.StatusCode}
 	}
-	if out == nil || resp.StatusCode == http.StatusNoContent {
+	if out == nil {
 		return nil
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(out); err != nil {
+	if resp.StatusCode == http.StatusNoContent {
+		return errors.New("arr returned no content for a resource read")
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, (16<<20)+1))
+	if err != nil {
+		return fmt.Errorf("read Arr response: %w", err)
+	}
+	if len(data) > 16<<20 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return errors.New("arr response is oversized or null")
+	}
+	if err := json.Unmarshal(data, out); err != nil {
 		return fmt.Errorf("decode %s: %w", requestURL, err)
 	}
 	return nil
@@ -88,6 +101,9 @@ func (c *ArrClient) Test(ctx context.Context) error {
 	}
 	if err := c.do(ctx, http.MethodGet, c.apiPath("system", "status"), nil, nil, &status); err != nil {
 		return err
+	}
+	if !strings.EqualFold(status.AppName, c.Kind()) || status.Version == "" {
+		return errors.New("unexpected application or missing version in Arr status")
 	}
 	c.log.Info("connected", "app", status.AppName, "version", status.Version, "api", c.config.APIVersion)
 	return nil
@@ -132,15 +148,23 @@ func (c *ArrClient) listSonarrFiles(ctx context.Context, includeEpisodeReleaseYe
 			releaseYears = latestEpisodeReleaseYearByFile(episodes)
 		}
 		for i := range group {
+			if group[i].ID < 1 || group[i].ParentID != item.ID {
+				return nil, errors.New("sonarr file list has mismatched identity")
+			}
 			group[i].ParentID = item.ID
 			if releaseYear := releaseYears[group[i].ID]; releaseYear > 0 {
 				// A multi-episode file must remain guarded when it contains any
 				// episode that is not old enough for the silent-media exclusion.
 				group[i].Year = releaseYear
-			} else if group[i].Year == 0 {
+			} else if !includeEpisodeReleaseYears && group[i].Year == 0 {
 				group[i].Year = item.Year
+			} else if includeEpisodeReleaseYears {
+				group[i].Year = 0
 			}
 			if group[i].Path == "" {
+				if item.Path == "" || group[i].RelativePath == "" {
+					return nil, errors.New("sonarr file has no complete path")
+				}
 				group[i].Path = joinArrPath(item.Path, group[i].RelativePath)
 			}
 		}
@@ -150,23 +174,40 @@ func (c *ArrClient) listSonarrFiles(ctx context.Context, includeEpisodeReleaseYe
 }
 
 func (c *ArrClient) sonarrEpisodes(ctx context.Context, seriesID int) ([]Episode, error) {
+	if seriesID < 1 {
+		return nil, errors.New("series ID must be positive")
+	}
 	query := url.Values{"seriesId": {strconv.Itoa(seriesID)}}
 	var episodes []Episode
 	if err := c.do(ctx, http.MethodGet, c.apiPath("episode"), query, nil, &episodes); err != nil {
 		return nil, err
+	}
+	seen := map[int]bool{}
+	for _, episode := range episodes {
+		if episode.ID < 1 || episode.SeriesID != seriesID || episode.EpisodeFileID < 0 || seen[episode.ID] {
+			return nil, errors.New("episode list has invalid or mismatched identity")
+		}
+		seen[episode.ID] = true
 	}
 	return episodes, nil
 }
 
 func latestEpisodeReleaseYearByFile(episodes []Episode) map[int]int {
 	years := make(map[int]int)
+	unknown := make(map[int]bool)
 	for _, episode := range episodes {
 		if episode.EpisodeFileID < 1 {
 			continue
 		}
+		if episode.ReleaseYear() == 0 {
+			unknown[episode.EpisodeFileID] = true
+		}
 		if releaseYear := episode.ReleaseYear(); releaseYear > years[episode.EpisodeFileID] {
 			years[episode.EpisodeFileID] = releaseYear
 		}
+	}
+	for id := range unknown {
+		years[id] = 0
 	}
 	return years
 }
@@ -198,11 +239,15 @@ func (c *ArrClient) listRadarrFiles(ctx context.Context) ([]MediaFile, error) {
 			return nil, fmt.Errorf("list files for movie %d: %w", item.ID, err)
 		}
 		for i := range group {
-			group[i].MovieID = item.ID
-			if group[i].Year == 0 {
-				group[i].Year = item.Year
+			if group[i].ID < 1 || group[i].MovieID != item.ID {
+				return nil, errors.New("radarr file list has mismatched identity")
 			}
+			group[i].MovieID = item.ID
+			group[i].Year = item.Year
 			if group[i].Path == "" {
+				if item.Path == "" || group[i].RelativePath == "" {
+					return nil, errors.New("radarr file has no complete path")
+				}
 				group[i].Path = joinArrPath(item.Path, group[i].RelativePath)
 			}
 		}
@@ -212,12 +257,18 @@ func (c *ArrClient) listRadarrFiles(ctx context.Context) ([]MediaFile, error) {
 }
 
 func (c *ArrClient) GetMediaFile(ctx context.Context, id int) (MediaFile, error) {
+	if id < 1 {
+		return MediaFile{}, errors.New("media file ID must be positive")
+	}
 	var result MediaFile
 	resource := "episodefile"
 	if c.Kind() == "radarr" {
 		resource = "moviefile"
 	}
 	err := c.do(ctx, http.MethodGet, c.apiPath(resource, strconv.Itoa(id)), nil, nil, &result)
+	if err == nil && (result.ID != id || result.SubjectID(c.Kind()) < 1) {
+		err = errors.New("arr returned mismatched media identity")
+	}
 	return result, err
 }
 
@@ -242,10 +293,13 @@ func (c *ArrClient) EpisodeIDsForFile(ctx context.Context, seriesID, fileID int)
 			ids = append(ids, episode.ID)
 		}
 	}
-	return ids, nil
+	return canonicalIDs(ids), nil
 }
 
 func (c *ArrClient) DeleteMediaFile(ctx context.Context, id int) error {
+	if id < 1 {
+		return errors.New("media file ID must be positive")
+	}
 	resource := "episodefile"
 	if c.Kind() == "radarr" {
 		resource = "moviefile"
@@ -254,6 +308,9 @@ func (c *ArrClient) DeleteMediaFile(ctx context.Context, id int) error {
 }
 
 func (c *ArrClient) SubjectHistory(ctx context.Context, subjectID int) ([]HistoryRecord, error) {
+	if subjectID < 1 {
+		return nil, errors.New("history subject ID must be positive")
+	}
 	var records []HistoryRecord
 	resource := "series"
 	key := "seriesId"
@@ -268,39 +325,54 @@ func (c *ArrClient) SubjectHistory(ctx context.Context, subjectID int) ([]Histor
 	return records, nil
 }
 
+func readArrPages[T any](ctx context.Context, c *ArrClient, resource string, query url.Values, id func(T) int) ([]T, error) {
+	all := []T{}
+	seen := map[int]bool{}
+	query.Set("pageSize", "1000")
+	for number := 1; number <= 10000; number++ {
+		query.Set("page", strconv.Itoa(number))
+		var page struct {
+			Records      []T `json:"records"`
+			TotalRecords int `json:"totalRecords"`
+		}
+		if err := c.do(ctx, http.MethodGet, c.apiPath(resource), query, nil, &page); err != nil {
+			return nil, err
+		}
+		if page.Records == nil || page.TotalRecords < 0 {
+			return nil, errors.New("arr returned an invalid page")
+		}
+		for _, record := range page.Records {
+			key := id(record)
+			if key < 1 || seen[key] {
+				return nil, errors.New("arr pagination has missing or repeated IDs; retry with a stable snapshot")
+			}
+			seen[key] = true
+			all = append(all, record)
+		}
+		if page.TotalRecords == 0 || len(all) >= page.TotalRecords {
+			return all, nil
+		}
+		if len(page.Records) == 0 {
+			return nil, errors.New("arr pagination ended before totalRecords")
+		}
+	}
+	return nil, errors.New("arr pagination exceeded safety limit")
+}
+
 func (c *ArrClient) DownloadHistory(ctx context.Context, downloadID string) ([]HistoryRecord, error) {
-	query := url.Values{
-		"downloadId":    {downloadID},
-		"page":          {"1"},
-		"pageSize":      {"1000"},
-		"sortKey":       {"date"},
-		"sortDirection": {"descending"},
+	if strings.TrimSpace(downloadID) == "" {
+		return nil, errors.New("download ID is required")
 	}
-	var page HistoryPage
-	if err := c.do(ctx, http.MethodGet, c.apiPath("history"), query, nil, &page); err != nil {
-		return nil, err
-	}
-	return page.Records, nil
+	return readArrPages(ctx, c, "history", url.Values{"downloadId": {downloadID}, "sortKey": {"date"}, "sortDirection": {"descending"}}, func(h HistoryRecord) int { return h.ID })
 }
 
 func (c *ArrClient) Queue(ctx context.Context) ([]QueueRecord, error) {
-	const pageSize = 1000
-	all := make([]QueueRecord, 0)
-	for pageNumber := 1; ; pageNumber++ {
-		query := url.Values{"page": {strconv.Itoa(pageNumber)}, "pageSize": {strconv.Itoa(pageSize)}, "sortKey": {"timeleft"}, "sortDirection": {"ascending"}}
-		var page QueuePage
-		if err := c.do(ctx, http.MethodGet, c.apiPath("queue"), query, nil, &page); err != nil {
-			return nil, err
-		}
-		all = append(all, page.Records...)
-		if len(page.Records) == 0 || page.TotalRecords == 0 || len(all) >= page.TotalRecords {
-			break
-		}
-	}
-	return all, nil
+	return readArrPages(ctx, c, "queue", url.Values{"sortKey": {"timeleft"}, "sortDirection": {"ascending"}}, func(q QueueRecord) int { return q.ID })
 }
-
 func (c *ArrClient) FailQueueItem(ctx context.Context, id int, message string) error {
+	if id < 1 {
+		return errors.New("queue ID must be positive")
+	}
 	query := url.Values{
 		"removeFromClient": {"true"},
 		"blocklist":        {"true"},
@@ -315,27 +387,24 @@ func (c *ArrClient) FailQueueItem(ctx context.Context, id int, message string) e
 }
 
 func (c *ArrClient) MarkHistoryFailed(ctx context.Context, id int) error {
+	if id < 1 {
+		return errors.New("history ID must be positive")
+	}
 	// The v3 history endpoint does not expose skipRedownload; the explicit
 	// search submitted by the service guarantees a replacement even when Arr's
 	// automatic failed-download redownload setting is disabled.
 	return c.do(ctx, http.MethodPost, c.apiPath("history", "failed", strconv.Itoa(id)), nil, nil, nil)
 }
 
-func (c *ArrClient) Search(ctx context.Context, subjectID int) error {
-	if c.Kind() == "sonarr" {
-		return c.SearchSeries(ctx, subjectID)
-	}
-	return c.SearchEpisodes(ctx, subjectID, nil)
-}
-
-func (c *ArrClient) SearchSeries(ctx context.Context, seriesID int) error {
-	if c.Kind() != "sonarr" {
-		return errors.New("series search is only available for Sonarr")
-	}
-	return c.do(ctx, http.MethodPost, c.apiPath("command"), nil, CommandRequest{Name: "SeriesSearch", SeriesID: seriesID}, nil)
-}
-
 func (c *ArrClient) SearchEpisodes(ctx context.Context, subjectID int, episodeIDs []int) error {
+	if subjectID < 1 {
+		return errors.New("search subject ID must be positive")
+	}
+	for _, id := range episodeIDs {
+		if id < 1 {
+			return errors.New("episode ID must be positive")
+		}
+	}
 	command := CommandRequest{}
 	if c.Kind() == "sonarr" {
 		if len(episodeIDs) == 0 {

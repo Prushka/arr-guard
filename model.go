@@ -2,7 +2,7 @@ package main
 
 import (
 	"encoding/json"
-	"strconv"
+	"os"
 	"strings"
 	"time"
 )
@@ -39,6 +39,9 @@ type Movie struct {
 }
 
 type HistoryRecord struct {
+	MovieID     int               `json:"movieId"`
+	SeriesID    int               `json:"seriesId"`
+	EpisodeID   int               `json:"episodeId"`
 	ID          int               `json:"id"`
 	DownloadID  string            `json:"downloadId"`
 	EventType   string            `json:"eventType"`
@@ -47,7 +50,8 @@ type HistoryRecord struct {
 }
 
 type HistoryPage struct {
-	Records []HistoryRecord `json:"records"`
+	Records      []HistoryRecord `json:"records"`
+	TotalRecords int             `json:"totalRecords"`
 }
 
 type QueueRecord struct {
@@ -121,16 +125,15 @@ type WebhookPayload struct {
 
 type Episode struct {
 	ID            int        `json:"id"`
+	SeriesID      int        `json:"seriesId"`
 	EpisodeFileID int        `json:"episodeFileId"`
 	AirDate       string     `json:"airDate"`
 	AirDateUTC    *time.Time `json:"airDateUtc"`
 }
 
 func (e Episode) ReleaseYear() int {
-	if len(e.AirDate) >= 4 {
-		if year, err := strconv.Atoi(e.AirDate[:4]); err == nil && year > 0 {
-			return year
-		}
+	if date, err := time.Parse("2006-01-02", e.AirDate); err == nil && date.Year() > 0 {
+		return date.Year()
 	}
 	if e.AirDateUTC != nil {
 		return e.AirDateUTC.Year()
@@ -159,6 +162,8 @@ type ProbeStream struct {
 }
 
 type Validation struct {
+	fileInfo           os.FileInfo
+	dirInfo            os.FileInfo
 	Valid              bool     `json:"valid"`
 	HasSubtitles       bool     `json:"hasSubtitles"`
 	HasEnglish         bool     `json:"hasEnglishSubtitles"`
@@ -168,7 +173,29 @@ type Validation struct {
 }
 
 type State struct {
-	Attempts map[string]int `json:"attempts"`
+	Attempts   map[string]int           `json:"attempts"`
+	Operations map[string]Operation     `json:"operations,omitempty"`
+	Completed  map[string]bool          `json:"completed,omitempty"`
+	Instances  map[string]string        `json:"instances,omitempty"`
+	Webhooks   map[string]StoredWebhook `json:"webhooks,omitempty"`
+}
+
+type StoredWebhook struct {
+	Kind        string         `json:"kind"`
+	Payload     WebhookPayload `json:"payload"`
+	Failures    int            `json:"failures"`
+	NextAttempt time.Time      `json:"nextAttempt"`
+}
+
+// A phase is persisted BEFORE its network mutation. An unfinished operation is
+// a safety latch, not permission to replay a non-idempotent request after restart.
+type Operation struct {
+	Kind       string `json:"kind"`
+	SubjectID  int    `json:"subjectId"`
+	FileID     int    `json:"fileId,omitempty"`
+	DownloadID string `json:"downloadId,omitempty"`
+	EpisodeIDs []int  `json:"episodeIds,omitempty"`
+	Phase      string `json:"phase"`
 }
 
 type UnmatchedReport struct {

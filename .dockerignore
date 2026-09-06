@@ -6,3 +6,7 @@ arr-guard
 *.exe
 state.json
 invalid.json
+unmatched.json
+*.lock
+audit-*.log
+audit-coverage*

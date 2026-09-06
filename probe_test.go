@@ -103,7 +103,7 @@ func TestDiscoverExternalSubtitleFormats(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"Movie.2024.en.srt", "Movie.2024.en.ass", "Movie.2024.en.vtt", "Movie.2024.en.sub", "Movie.2024.en.idx", "Movie.2024.en.sup", "Movie.2024.en.pgs"} {
-		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("subtitle fixture"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

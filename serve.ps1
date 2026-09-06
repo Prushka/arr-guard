@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [ValidateRange(0, 128)]
-    [int]$WorkerCount = 0
+	[int]$WorkerCount = 0,
+	[switch]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,7 +21,7 @@ foreach ($line in Get-Content -LiteralPath $envPath) {
     }
 
     if ($trimmed -notmatch '^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') {
-        throw "Invalid .env entry: $line"
+        throw 'Invalid .env entry (value redacted)'
     }
 
     $name = $Matches[1]
@@ -38,6 +39,10 @@ foreach ($line in Get-Content -LiteralPath $envPath) {
 
 if ($WorkerCount -gt 0) {
     [Environment]::SetEnvironmentVariable('WORKERS', $WorkerCount.ToString(), 'Process')
+}
+
+if ($DryRun) {
+    [Environment]::SetEnvironmentVariable('DRY_RUN', 'true', 'Process')
 }
 
 Push-Location -LiteralPath $projectDirectory

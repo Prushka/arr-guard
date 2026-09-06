@@ -2,5 +2,8 @@
 /*.exe
 /state.json
 /unmatched.json
+/state.json.lock
+/audit-*.log
+/audit-coverage*
 .env
 .idea

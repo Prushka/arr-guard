@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,31 +20,57 @@ type Prober struct {
 }
 
 func (p Prober) Validate(ctx context.Context, filePath string) (Validation, error) {
+	if !filepath.IsAbs(filePath) {
+		return Validation{}, errors.New("probe requires an absolute local file path")
+	}
+	before, err := os.Stat(filePath)
+	if err != nil {
+		return Validation{}, err
+	}
+	if !before.Mode().IsRegular() || before.Size() == 0 {
+		return Validation{}, errors.New("probe requires a nonempty regular file")
+	}
+	directory, err := os.Stat(filepath.Dir(filePath))
+	if err != nil {
+		return Validation{}, err
+	}
+	if p.Timeout <= 0 {
+		p.Timeout = 10 * time.Minute
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, p.Timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(probeCtx, p.Path,
 		"-v", "error",
+		"-protocol_whitelist", "file,pipe,crypto",
 		// Only subtitle streams are relevant; avoiding audio/video metadata
 		// keeps probes small without limiting subtitle discovery.
 		"-select_streams", "s",
 		"-show_entries", "stream=codec_type,codec_name:stream_tags=language,title:stream_disposition=default,forced,hearing_impaired",
 		"-of", "json",
-		filePath,
+		"-i", filePath,
 	)
-	var stdout, stderr bytes.Buffer
+	stdout := limitedBuffer{limit: 4 << 20}
+	stderr := limitedBuffer{limit: 64 << 10}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	cmd.WaitDelay = 2 * time.Second
 	if err := cmd.Run(); err != nil {
 		if probeCtx.Err() != nil {
-			return Validation{}, fmt.Errorf("ffprobe timed out after %s", p.Timeout)
+			return Validation{}, fmt.Errorf("ffprobe interrupted: %w", probeCtx.Err())
 		}
 		return Validation{}, fmt.Errorf("ffprobe: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	if stderr.Len() > 0 {
+		return Validation{}, errors.New("ffprobe reported media errors; subtitle absence is not trustworthy")
 	}
 
 	var result ProbeResult
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		return Validation{}, fmt.Errorf("decode ffprobe output: %w", err)
+	}
+	if result.Streams == nil {
+		return Validation{}, errors.New("ffprobe output is missing the streams array")
 	}
 
 	summary := newSubtitleSummary()
@@ -65,7 +92,30 @@ func (p Prober) Validate(ctx context.Context, filePath string) (Validation, erro
 		summary.add(subtitle.Language)
 	}
 
-	return summary.validation(), nil
+	after, err := os.Stat(filePath)
+	if err != nil || !sameDiskFile(before, after) {
+		return Validation{}, errors.New("media changed during probe")
+	}
+	validation := summary.validation()
+	validation.fileInfo = after
+	validation.dirInfo = directory
+	return validation, nil
+}
+
+type limitedBuffer struct {
+	buffer bytes.Buffer
+	limit  int
+}
+
+func (b *limitedBuffer) Len() int       { return b.buffer.Len() }
+func (b *limitedBuffer) Bytes() []byte  { return b.buffer.Bytes() }
+func (b *limitedBuffer) String() string { return b.buffer.String() }
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if len(p) > b.limit-b.Len() {
+		return 0, errors.New("ffprobe output exceeds safety limit")
+	}
+	return b.buffer.Write(p)
 }
 
 // subtitleSummary records the stream type from ffprobe rather than a fixed
@@ -166,7 +216,16 @@ func discoverExternalSubtitles(filePath string) ([]externalSubtitle, error) {
 		if _, ok := subtitleExtensions[ext]; !ok {
 			continue
 		}
-		suffix := strings.TrimSuffix(candidate[len(stem)+1:], filepath.Ext(candidate))
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() || info.Size() == 0 {
+			return nil, errors.New("matching subtitle is empty or not a regular file; retry after import completes")
+		}
+		// Lowercasing Unicode can change byte lengths. Slice the same normalized
+		// string that was prefix-matched, not by the original media stem length.
+		suffix := strings.TrimSuffix(lowerCandidate[len(prefix):], ext)
 		language, _ := sidecarLanguage(suffix)
 		result = append(result, externalSubtitle{Language: language})
 	}
@@ -216,11 +275,19 @@ func isUnknownLanguage(language string) bool {
 }
 
 func subtitleStreamLanguage(tags map[string]string) string {
-	language := normalizeLanguage(tags["language"])
+	metadata := func(key string) string {
+		for name, value := range tags {
+			if strings.EqualFold(name, key) {
+				return value
+			}
+		}
+		return ""
+	}
+	language := normalizeLanguage(metadata("language"))
 	if language != "" && !isUnidentifiedLanguage(language) {
 		return language
 	}
-	if titleLanguage := languageFromLabel(tags["title"]); titleLanguage != "" {
+	if titleLanguage := languageFromLabel(metadata("title")); titleLanguage != "" {
 		return titleLanguage
 	}
 	return language

@@ -3,14 +3,15 @@ services:
     image: meinya/arr-guard:latest
     restart: unless-stopped
     environment:
-      MODE: "subtitles" #serve #subtitles #unmatched
+      MODE: "serve" # use docker compose run --rm -e MODE=subtitles arr-guard for a one-time scan
       LISTEN_ADDR: ":8080"
       FFPROBE_PATH: "/usr/local/bin/ffprobe"
       SONARR_URL: "http://sonarr:8989"
       SONARR_API_KEY: "replace-me"
       RADARR_URL: "http://radarr:7878"
       RADARR_API_KEY: "replace-me"
-      DRY_RUN: "false"
+      DRY_RUN: "true"
+      RECOVER_BLOCKED_QUEUE: "false"
       UNMATCHED_PATH: "/var/lib/arr-guard/unmatched.json"
       UNMATCHED_EXCLUDE_DIRS: ""
       STATE_PATH: "/var/lib/arr-guard/state.json"

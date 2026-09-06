@@ -38,10 +38,8 @@ func run(ctx context.Context, args []string) (runErr error) {
 	if err != nil {
 		return err
 	}
-	// A media-file deletion is performed before the failure/blocklist and
-	// replacement-search API calls. Keep a short, independent shutdown window
-	// to finish those calls if the main context is canceled or a run returns
-	// after an API error.
+	defer func() { _ = service.state.Close() }()
+	// Never replay a possibly committed mutation during shutdown.
 	defer func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cleanupCancel()
@@ -67,7 +65,5 @@ func run(ctx context.Context, args []string) (runErr error) {
 	if cfg.Mode == "unmatched" {
 		return service.ScanUnmatched(ctx)
 	}
-	service.StartWorkers(ctx)
-	defer service.StopWorkers()
 	return service.Serve(ctx)
 }
