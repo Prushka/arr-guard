@@ -10,8 +10,6 @@ import (
 	"time"
 )
 
-const maxWebhookFailures = 5
-
 func storedWebhook(kind string, payload WebhookPayload) (string, StoredWebhook, error) {
 	if kind != "sonarr" && kind != "radarr" {
 		return "", StoredWebhook{}, errors.New("unknown Arr kind")
@@ -53,8 +51,17 @@ func storedWebhook(kind string, payload WebhookPayload) (string, StoredWebhook, 
 func (s *StateStore) AddWebhook(key string, job StoredWebhook) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.state.Webhooks[key]; exists {
-		return nil
+	if existing, exists := s.state.Webhooks[key]; exists {
+		if !existing.NeedsReview {
+			return nil
+		}
+		// Redelivery asks for a fresh evaluation, never replay of journaled work.
+		return s.updateLocked(func(next *State) {
+			existing.NeedsReview = false
+			existing.Failures = 0
+			existing.NextAttempt = time.Time{}
+			next.Webhooks[key] = existing
+		})
 	}
 	if len(s.state.Webhooks) >= 1000 {
 		return errors.New("durable webhook queue is full")
@@ -80,8 +87,9 @@ func (s *StateStore) FinishWebhook(key string, processingErr error) error {
 			delete(next.Webhooks, key)
 			return
 		}
-		job.Failures++
-		job.NextAttempt = time.Now().Add(time.Minute * time.Duration(1<<min(job.Failures-1, 4)))
+		job.Failures = min(job.Failures+1, maxWebhookBackoffFailures)
+		job.NeedsReview = !canRetryProcessing(processingErr)
+		job.NextAttempt = time.Now().Add(webhookBackoff(job.Failures))
 		next.Webhooks[key] = job
 	})
 }
@@ -99,7 +107,7 @@ func (s *Service) dispatchStoredJobs() {
 		s.scheduled = map[string]bool{}
 	}
 	for key, stored := range s.state.Webhooks() {
-		if s.scheduled[key] || stored.Failures >= maxWebhookFailures || time.Now().Before(stored.NextAttempt) {
+		if s.scheduled[key] || stored.NeedsReview || time.Now().Before(stored.NextAttempt) {
 			continue
 		}
 		client := s.arr[stored.Kind]
@@ -125,6 +133,8 @@ func (s *Service) finishJob(job webhookJob, err error) {
 	if !s.stopping && !errors.Is(err, context.Canceled) {
 		if saveErr := s.state.FinishWebhook(job.key, err); saveErr != nil {
 			s.log.Error("could not persist webhook result", "error", saveErr)
+		} else if err != nil && !canRetryProcessing(err) {
+			s.log.Warn("webhook paused for review; redelivery can recheck without replaying mutations", "arr", job.client.Kind(), "error", err)
 		}
 	}
 	delete(s.scheduled, job.key)

@@ -57,13 +57,17 @@ func LoadStateStore(path string) (*StateStore, error) {
 		}
 	}
 	for key, job := range store.state.Webhooks {
-		if job.Failures < 0 || job.Failures > maxWebhookFailures {
+		if job.Failures < 0 {
 			return nil, errors.New("invalid webhook retry state")
 		}
 		expected, _, err := storedWebhook(job.Kind, job.Payload)
 		if err != nil || key != expected {
 			return nil, errors.New("invalid durable webhook")
 		}
+		// Legacy five-failure jobs may safely re-evaluate reads after upgrade.
+		// Pending operations continue to fence every mutation.
+		job.Failures = min(job.Failures, maxWebhookBackoffFailures)
+		store.state.Webhooks[key] = job
 	}
 	// Migrate legacy episode combinations to independent counters so changing
 	// release grouping cannot reset a retry cap.
@@ -149,7 +153,7 @@ func (s *StateStore) Begin(key string, op Operation, retryKeys []string) (int, b
 	}
 	for _, pending := range s.state.Operations {
 		if pending.Kind == op.Kind && (pending.SubjectID == op.SubjectID || (op.DownloadID != "" && strings.EqualFold(pending.DownloadID, op.DownloadID))) {
-			return 0, false, errors.New("unfinished operation requires manual reconciliation in STATE_PATH")
+			return 0, false, requireReconciliation(errors.New("unfinished operation requires manual reconciliation in STATE_PATH"))
 		}
 	}
 	attempt := 0
@@ -185,6 +189,35 @@ func (s *StateStore) Complete(key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.updateLocked(func(next *State) { delete(next.Operations, key); next.Completed[key] = true })
+}
+
+// Record who will search before history failure can itself enqueue an Arr search.
+func (s *StateStore) OriginRequested(key string, automaticSearch bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	op, ok := s.state.Operations[key]
+	if !ok {
+		return errors.New("missing operation journal entry")
+	}
+	return s.updateLocked(func(next *State) {
+		op.Phase = "origin-requested"
+		op.AutomaticSearch = automaticSearch
+		next.Operations[key] = op
+	})
+}
+
+func (s *StateStore) SearchRequested(key string, ids []int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	op, ok := s.state.Operations[key]
+	if !ok {
+		return errors.New("missing operation journal entry")
+	}
+	return s.updateLocked(func(next *State) {
+		op.Phase = "search-requested"
+		op.SearchEpisodeIDs = append([]int(nil), ids...)
+		next.Operations[key] = op
+	})
 }
 
 func (s *StateStore) Pending() map[string]Operation {

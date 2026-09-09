@@ -285,7 +285,7 @@ func TestLiveReadOnly(t *testing.T) {
 						if err != nil {
 							t.Fatal("cannot prepare local snapshot fixture")
 						}
-						if err := service.applyValidation(ctx, client, file, v, path); err == nil || !strings.Contains(err.Error(), "subtitle directory changed before retry-state reset") {
+						if err := service.applyValidation(ctx, client, file, v, path); err == nil || !strings.Contains(err.Error(), "subtitle directory changed") {
 							t.Error("live stale-directory check did not refuse the snapshot")
 						} else {
 							t.Log("real_snapshot_recheck=passed local_memory_fault_only=true")

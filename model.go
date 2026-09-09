@@ -164,6 +164,8 @@ type ProbeStream struct {
 type Validation struct {
 	fileInfo           os.FileInfo
 	dirInfo            os.FileInfo
+	sidecars           []externalSubtitle
+	sidecarsChecked    bool
 	Valid              bool     `json:"valid"`
 	HasSubtitles       bool     `json:"hasSubtitles"`
 	HasEnglish         bool     `json:"hasEnglishSubtitles"`
@@ -185,17 +187,20 @@ type StoredWebhook struct {
 	Payload     WebhookPayload `json:"payload"`
 	Failures    int            `json:"failures"`
 	NextAttempt time.Time      `json:"nextAttempt"`
+	NeedsReview bool           `json:"needsReview,omitempty"`
 }
 
 // A phase is persisted BEFORE its network mutation. An unfinished operation is
 // a safety latch, not permission to replay a non-idempotent request after restart.
 type Operation struct {
-	Kind       string `json:"kind"`
-	SubjectID  int    `json:"subjectId"`
-	FileID     int    `json:"fileId,omitempty"`
-	DownloadID string `json:"downloadId,omitempty"`
-	EpisodeIDs []int  `json:"episodeIds,omitempty"`
-	Phase      string `json:"phase"`
+	Kind             string `json:"kind"`
+	SubjectID        int    `json:"subjectId"`
+	FileID           int    `json:"fileId,omitempty"`
+	DownloadID       string `json:"downloadId,omitempty"`
+	EpisodeIDs       []int  `json:"episodeIds,omitempty"`
+	Phase            string `json:"phase"`
+	AutomaticSearch  bool   `json:"automaticSearch,omitempty"`
+	SearchEpisodeIDs []int  `json:"searchEpisodeIds,omitempty"`
 }
 
 type UnmatchedReport struct {

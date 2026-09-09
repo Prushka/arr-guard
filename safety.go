@@ -130,6 +130,8 @@ func sameDiskFile(a, b os.FileInfo) bool {
 type originAction struct {
 	queueID, historyID, subjectID int
 	downloadID                    string
+	releaseSource                 string
+	automaticSearch               bool
 }
 
 func (s *Service) prepareOrigin(ctx context.Context, c *ArrClient, file MediaFile, downloadID string) (originAction, error) {
@@ -150,7 +152,7 @@ func (s *Service) prepareOrigin(ctx context.Context, c *ArrClient, file MediaFil
 			return originAction{}, errors.New("download is shared with another subject; refusing queue removal")
 		}
 		if !strings.EqualFold(q.Status, "completed") || !strings.EqualFold(q.TrackedDownloadState, "imported") || q.ID < 1 {
-			return originAction{}, errors.New("origin download is still importing or has no queue identity")
+			return originAction{}, deferProcessing(errors.New("origin download is still importing or has no queue identity"))
 		}
 		if c.Kind() == "sonarr" {
 			queuedEpisodes = append(queuedEpisodes, q.EpisodeID)
@@ -169,7 +171,7 @@ func (s *Service) prepareOrigin(ctx context.Context, c *ArrClient, file MediaFil
 			}
 			for _, id := range queuedEpisodes {
 				if !imported[id] {
-					return originAction{}, errors.New("shared download contains episodes without imported files")
+					return originAction{}, deferProcessing(errors.New("shared download contains episodes without imported files"))
 				}
 			}
 		}
@@ -179,7 +181,7 @@ func (s *Service) prepareOrigin(ctx context.Context, c *ArrClient, file MediaFil
 	if err != nil {
 		return originAction{}, err
 	}
-	grabID := 0
+	var grabbed HistoryRecord
 	alreadyFailed := false
 	for _, h := range records {
 		if !strings.EqualFold(h.DownloadID, downloadID) {
@@ -192,33 +194,50 @@ func (s *Service) prepareOrigin(ctx context.Context, c *ArrClient, file MediaFil
 			alreadyFailed = true
 		}
 		if strings.EqualFold(h.EventType, "grabbed") && h.ID > 0 {
-			grabID = h.ID
+			grabbed = h
 		}
 	}
 	if alreadyFailed {
 		return originAction{}, nil
 	}
-	if grabID == 0 {
-		return originAction{}, errors.New("no grabbed history for known originating download")
+	if grabbed.ID == 0 {
+		return originAction{}, deferProcessing(errors.New("no grabbed history for known originating download"))
 	}
-	if err := c.CheckHistoryFailureSafety(ctx); err != nil {
+	automatic, err := c.AutomaticHistorySearch(ctx, grabbed.Data["releaseSource"])
+	if err != nil {
 		return originAction{}, err
 	}
-	return originAction{historyID: grabID}, nil
+	return originAction{historyID: grabbed.ID, releaseSource: grabbed.Data["releaseSource"], automaticSearch: automatic}, nil
 }
 
-func (c *ArrClient) CheckHistoryFailureSafety(ctx context.Context) error {
+// Match Arr's RedownloadFailedDownloadService: the main setting gates every
+// release, with an additional opt-out for releases grabbed by interactive search.
+// Missing/invalid releaseSource is Unknown in Arr, not InteractiveSearch.
+func (c *ArrClient) AutomaticHistorySearch(ctx context.Context, releaseSource string) (bool, error) {
 	var cfg struct {
 		Auto        *bool `json:"autoRedownloadFailed"`
 		Interactive *bool `json:"autoRedownloadFailedFromInteractiveSearch"`
 	}
 	if err := c.do(ctx, http.MethodGet, c.apiPath("config", "downloadclient"), nil, nil, &cfg); err != nil {
-		return err
+		return false, err
 	}
-	if cfg.Auto == nil || cfg.Interactive == nil || *cfg.Auto || *cfg.Interactive {
-		return errors.New("history failure requires both Arr automatic failed-redownload settings disabled; refusing to bypass scoped search limits")
+	if cfg.Auto == nil {
+		return false, errors.New("arr automatic failed-redownload setting is missing")
 	}
-	return nil
+	if !*cfg.Auto {
+		return false, nil
+	}
+	// Enum.TryParse in Arr accepts both the case-sensitive enum name and its
+	// numeric value (InteractiveSearch = 4 in Sonarr and Radarr).
+	releaseSource = strings.TrimSpace(releaseSource)
+	numeric, _ := strconv.Atoi(releaseSource)
+	if releaseSource == "InteractiveSearch" || numeric == 4 {
+		if cfg.Interactive == nil {
+			return false, errors.New("arr interactive failed-redownload setting is missing")
+		}
+		return *cfg.Interactive, nil
+	}
+	return true, nil
 }
 
 func (s *Service) applyOrigin(ctx context.Context, c *ArrClient, action originAction, reason string) error {
@@ -250,9 +269,6 @@ func (s *Service) applyOrigin(ctx context.Context, c *ArrClient, action originAc
 		return c.FailQueueItem(ctx, action.queueID, "Subtitle Guard: "+reason)
 	}
 	if action.historyID > 0 {
-		if err := c.CheckHistoryFailureSafety(ctx); err != nil {
-			return err
-		}
 		return c.MarkHistoryFailed(ctx, action.historyID)
 	}
 	return nil
@@ -285,35 +301,72 @@ func openServiceState(cfg Config) (*StateStore, error) {
 }
 
 func (s *Service) searchStillMissing(ctx context.Context, c *ArrClient, subjectID int, ids []int) error {
+	remaining, needed, err := s.remainingSearchTargets(ctx, c, subjectID, ids)
+	if err != nil {
+		return err
+	}
+	if !needed || (c.Kind() == "sonarr" && len(remaining) != len(canonicalIDs(ids))) {
+		return errors.New("queue recovery target has existing media; leaving shared download untouched")
+	}
+	return nil
+}
+
+func (s *Service) remainingSearchTargets(ctx context.Context, c *ArrClient, subjectID int, ids []int) ([]int, bool, error) {
 	if c.Kind() == "sonarr" {
 		episodes, err := c.sonarrEpisodes(ctx, subjectID)
 		if err != nil {
-			return err
+			return nil, false, err
 		}
 		missing := map[int]bool{}
 		for _, episode := range episodes {
 			missing[episode.ID] = episode.EpisodeFileID == 0
 		}
-		for _, id := range ids {
-			if !missing[id] {
-				return errors.New("search target has a replacement or no longer exists; reconciliation required")
+		var remaining []int
+		for _, id := range canonicalIDs(ids) {
+			isMissing, exists := missing[id]
+			if !exists {
+				return nil, false, errors.New("search target no longer exists; reconciliation required")
+			}
+			if isMissing {
+				remaining = append(remaining, id)
 			}
 		}
+		return remaining, len(remaining) > 0, nil
 	} else {
 		var movie Movie
 		if err := c.do(ctx, http.MethodGet, c.apiPath("movie", strconv.Itoa(subjectID)), nil, nil, &movie); err != nil {
-			return err
+			return nil, false, err
 		}
 		if movie.ID != subjectID {
-			return errors.New("movie identity changed before search")
+			return nil, false, errors.New("movie identity changed before search")
 		}
 		var files []MediaFile
 		if err := c.do(ctx, http.MethodGet, c.apiPath("moviefile"), url.Values{"movieId": {strconv.Itoa(subjectID)}}, nil, &files); err != nil {
-			return err
+			return nil, false, err
 		}
-		if len(files) > 0 {
-			return errors.New("movie already has a replacement; reconciliation required")
+		for _, file := range files {
+			if file.ID < 1 || file.MovieID != subjectID {
+				return nil, false, errors.New("replacement movie file has mismatched identity")
+			}
 		}
+		return nil, len(files) == 0, nil
+	}
+}
+
+func (s *Service) searchRemaining(ctx context.Context, c *ArrClient, key string, subjectID int, ids []int) error {
+	remaining, needed, err := s.remainingSearchTargets(ctx, c, subjectID, ids)
+	if err != nil {
+		return err
+	}
+	if !needed {
+		s.log.Info("search skipped; targets already have replacement files", "arr", c.Kind(), "subject_id", subjectID)
+		return nil
+	}
+	if err := s.state.SearchRequested(key, remaining); err != nil {
+		return err
+	}
+	if err := c.SearchEpisodes(ctx, subjectID, remaining); err != nil {
+		return fmt.Errorf("search outcome requires reconciliation: %w", err)
 	}
 	return nil
 }

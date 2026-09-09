@@ -34,19 +34,22 @@ func TestDurableWebhookAdmissionSurvivesRestartAndRetries(t *testing.T) {
 	if job.payload.DownloadID != payload.DownloadID || len(job.payload.Episodes) != 0 || len(job.payload.files("sonarr")) != 1 {
 		t.Fatal("persisted unexpected webhook metadata")
 	}
-	f.service.finishJob(job, errors.New("read failed"))
+	f.service.finishJob(job, deferProcessing(errors.New("read failed")))
 	f.service.dispatchStoredJobs()
 	if len(f.service.jobs) != 0 {
 		t.Fatal("failed webhook ignored backoff")
 	}
-	for i := 1; i < maxWebhookFailures; i++ {
-		if err := reloaded.FinishWebhook(job.key, errors.New("read failed")); err != nil {
+	for i := 1; i < 12; i++ {
+		if err := reloaded.FinishWebhook(job.key, deferProcessing(errors.New("read failed"))); err != nil {
 			t.Fatal(err)
 		}
 	}
 	f.service.dispatchStoredJobs()
 	if len(f.service.jobs) != 0 {
-		t.Fatal("failed webhook exceeded retry cap")
+		t.Fatal("failed webhook ignored capped backoff")
+	}
+	if reloaded.Webhooks()[job.key].NeedsReview {
+		t.Fatal("transient job was permanently paused")
 	}
 	if err := reloaded.FinishWebhook(job.key, nil); err != nil {
 		t.Fatal(err)

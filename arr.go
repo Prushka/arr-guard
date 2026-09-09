@@ -390,9 +390,8 @@ func (c *ArrClient) MarkHistoryFailed(ctx context.Context, id int) error {
 	if id < 1 {
 		return errors.New("history ID must be positive")
 	}
-	// The v3 history endpoint does not expose skipRedownload; the explicit
-	// search submitted by the service guarantees a replacement even when Arr's
-	// automatic failed-download redownload setting is disabled.
+	// The v3 history endpoint does not expose skipRedownload. The service reads
+	// the effective Arr policy and sends its own search only when Arr will not.
 	return c.do(ctx, http.MethodPost, c.apiPath("history", "failed", strconv.Itoa(id)), nil, nil, nil)
 }
 

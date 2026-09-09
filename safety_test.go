@@ -62,7 +62,7 @@ func TestConcurrentWebhooksSerializeOriginHistoryReads(t *testing.T) {
 	var active, peak, probes, mutations atomic.Int32
 	f.service.probeFn = func(context.Context, string) (Validation, error) {
 		probes.Add(1)
-		return Validation{}, errors.New("history failure should stop before probing")
+		return f.validation, nil
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -117,7 +117,7 @@ func TestConcurrentWebhooksSerializeOriginHistoryReads(t *testing.T) {
 		})
 	}
 	wg.Wait()
-	if got := peak.Load(); got != 1 || probes.Load() != 0 || mutations.Load() != 0 {
+	if got := peak.Load(); got != 1 || probes.Load() != 8 || mutations.Load() != 0 {
 		t.Fatalf("history reads peak=%d probes=%d mutations=%d", got, probes.Load(), mutations.Load())
 	}
 }
@@ -125,20 +125,24 @@ func TestConcurrentWebhooksSerializeOriginHistoryReads(t *testing.T) {
 // All media mutation tests use this local API and disposable disk fixtures.
 // DELETE changes only the fake API's in-memory state, never even the fixture file.
 type safetyFixture struct {
-	mu             sync.Mutex
-	service        *Service
-	client         *ArrClient
-	file           MediaFile
-	validation     Validation
-	deleted        bool
-	queue          []QueueRecord
-	episodes       []Episode
-	history        []HistoryRecord
-	mutations      []string
-	commands       []CommandRequest
-	fail           string
-	before         func(*http.Request)
-	autoRedownload bool
+	mu                    sync.Mutex
+	service               *Service
+	client                *ArrClient
+	file                  MediaFile
+	validation            Validation
+	deleted               bool
+	queue                 []QueueRecord
+	episodes              []Episode
+	replacementEpisodes   []Episode
+	replacementFiles      []MediaFile
+	history               []HistoryRecord
+	mutations             []string
+	commands              []CommandRequest
+	fail                  string
+	before                func(*http.Request)
+	autoRedownload        bool
+	interactiveRedownload bool
+	configResponse        any
 }
 
 func newSafetyFixture(t *testing.T, kind string) *safetyFixture {
@@ -159,7 +163,7 @@ func newSafetyFixture(t *testing.T, kind string) *safetyFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &safetyFixture{file: MediaFile{ID: 17, MovieID: 3, ParentID: 3, Path: media, RelativePath: "fixture.mkv", Size: info.Size(), Year: time.Now().Year()}, validation: Validation{Reason: "no subtitles", fileInfo: info, dirInfo: dir}, queue: []QueueRecord{}, episodes: []Episode{{ID: 10, SeriesID: 3, EpisodeFileID: 17, AirDate: "2025-01-01"}, {ID: 12, SeriesID: 3, EpisodeFileID: 17, AirDate: "2025-01-01"}}, history: []HistoryRecord{}}
+	f := &safetyFixture{file: MediaFile{ID: 17, MovieID: 3, ParentID: 3, Path: media, RelativePath: "fixture.mkv", Size: info.Size(), Year: time.Now().Year()}, validation: Validation{Reason: "no subtitles", fileInfo: info, dirInfo: dir, sidecarsChecked: true}, queue: []QueueRecord{}, episodes: []Episode{{ID: 10, SeriesID: 3, EpisodeFileID: 17, AirDate: "2025-01-01"}, {ID: 12, SeriesID: 3, EpisodeFileID: 17, AirDate: "2025-01-01"}}, history: []HistoryRecord{}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -197,7 +201,8 @@ func newSafetyFixture(t *testing.T, kind string) *safetyFixture {
 			respond([]Movie{{ID: 3, Year: f.file.Year}})
 		case r.Method == http.MethodGet && (r.URL.Path == "/api/v3/moviefile" || r.URL.Path == "/api/v3/episodefile"):
 			if f.deleted {
-				respond([]MediaFile{})
+				files := append([]MediaFile{}, f.replacementFiles...)
+				respond(files)
 			} else {
 				respond([]MediaFile{f.file})
 			}
@@ -206,6 +211,9 @@ func newSafetyFixture(t *testing.T, kind string) *safetyFixture {
 			if f.deleted {
 				for i := range episodes {
 					episodes[i].EpisodeFileID = 0
+				}
+				if f.replacementEpisodes != nil {
+					episodes = append([]Episode(nil), f.replacementEpisodes...)
 				}
 			}
 			respond(episodes)
@@ -216,7 +224,11 @@ func newSafetyFixture(t *testing.T, kind string) *safetyFixture {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/queue":
 			respond(QueuePage{Records: f.queue, TotalRecords: len(f.queue)})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/config/downloadclient":
-			respond(map[string]bool{"autoRedownloadFailed": f.autoRedownload, "autoRedownloadFailedFromInteractiveSearch": f.autoRedownload})
+			if f.configResponse != nil {
+				respond(f.configResponse)
+			} else {
+				respond(map[string]bool{"autoRedownloadFailed": f.autoRedownload, "autoRedownloadFailedFromInteractiveSearch": f.interactiveRedownload})
+			}
 		case r.Method == http.MethodDelete && (r.URL.Path == "/api/v3/moviefile/17" || r.URL.Path == "/api/v3/episodefile/17"):
 			f.deleted = true
 			w.WriteHeader(204)
@@ -328,29 +340,6 @@ func TestPreflightFailuresNeverDelete(t *testing.T) {
 	}
 }
 
-func TestHistoryFailureRequiresDisabledAutomaticRedownload(t *testing.T) {
-	for _, automatic := range []bool{false, true} {
-		t.Run(map[bool]string{true: "unsafe", false: "safe"}[automatic], func(t *testing.T) {
-			f := newSafetyFixture(t, "sonarr")
-			f.autoRedownload = automatic
-			f.history = []HistoryRecord{{ID: 2, SeriesID: 3, DownloadID: "origin", EventType: "downloadFolderImported", Data: map[string]string{"fileId": "17"}}, {ID: 1, SeriesID: 3, DownloadID: "origin", EventType: "grabbed"}}
-			err := f.apply(t.Context())
-			if automatic {
-				if err == nil || len(f.mutations) > 0 {
-					t.Fatal("unsafe automatic redownload allowed")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !slices.Equal(f.mutations, []string{"DELETE /api/v3/episodefile/17", "POST /api/v3/history/failed/1", "POST /api/v3/command"}) {
-				t.Fatalf("wrong origin record/order: %v", f.mutations)
-			}
-		})
-	}
-}
-
 func TestStaleMediaAndEpisodeMappingNeverDelete(t *testing.T) {
 	for _, change := range []string{"path", "size", "parent", "mapping", "disk", "sidecar"} {
 		t.Run(change, func(t *testing.T) {
@@ -370,8 +359,7 @@ func TestStaleMediaAndEpisodeMappingNeverDelete(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "sidecar":
-				info := f.validation.dirInfo
-				if err := os.Chtimes(filepath.Dir(f.file.Path), time.Now(), info.ModTime().Add(time.Second)); err != nil {
+				if err := os.WriteFile(filepath.Join(filepath.Dir(f.file.Path), "fixture.en.srt"), []byte("new subtitles"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -405,7 +393,7 @@ func TestValidProbeKeepsRetryCountsWhenSubtitleSnapshotIsStale(t *testing.T) {
 					f.validation.dirInfo = nil
 				} else if snapshot == "missingMedia" {
 					f.validation.fileInfo = nil
-				} else if err := os.Chtimes(filepath.Dir(f.file.Path), time.Now(), f.validation.dirInfo.ModTime().Add(time.Second)); err != nil {
+				} else if err := os.WriteFile(filepath.Join(filepath.Dir(f.file.Path), "fixture.en.srt"), []byte("new subtitles"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				if err := f.apply(t.Context()); err == nil {

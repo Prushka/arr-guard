@@ -228,7 +228,7 @@ func (s *Service) recoverBlockedQueue(ctx context.Context, client *ArrClient) er
 	return firstErr
 }
 
-func (s *Service) recoverBlockedQueueItem(ctx context.Context, client *ArrClient, item QueueRecord) error {
+func (s *Service) recoverBlockedQueueItem(ctx context.Context, client *ArrClient, item QueueRecord) (resultErr error) {
 	if !item.needsImportRecovery() {
 		return nil
 	}
@@ -297,20 +297,19 @@ func (s *Service) recoverBlockedQueueItem(ctx context.Context, client *ArrClient
 	if err != nil || !started {
 		return err
 	}
+	defer func() {
+		if resultErr != nil {
+			resultErr = requireReconciliation(resultErr)
+		}
+	}()
 	if err := client.FailQueueItem(ctx, item.ID, "Subtitle Guard: unable to import automatically"); err != nil {
 		return fmt.Errorf("queue removal outcome requires reconciliation: %w", err)
 	}
 	if err := s.state.Phase(key, "queue-removed"); err != nil {
 		return err
 	}
-	if err := s.searchStillMissing(ctx, client, subjectID, ids); err != nil {
+	if err := s.searchRemaining(ctx, client, key, subjectID, ids); err != nil {
 		return err
-	}
-	if err := s.state.Phase(key, "search-requested"); err != nil {
-		return err
-	}
-	if err := client.SearchEpisodes(ctx, subjectID, ids); err != nil {
-		return fmt.Errorf("queue replacement search outcome requires reconciliation: %w", err)
 	}
 	return s.state.Complete(key)
 }
@@ -383,21 +382,8 @@ func (s *Service) processWebhook(ctx context.Context, client *ArrClient, payload
 			if err != nil {
 				return err
 			}
-			if payload.DownloadID != "" && !s.skipSilentMediaGuard(client, file) {
-				// This early consistency check uses the same potentially slow
-				// history endpoint as remediation preflight. Bound webhook bursts too.
-				s.mutationMu.Lock()
-				origin, _, err := s.findOrigin(ctx, client, file)
-				s.mutationMu.Unlock()
-				if err != nil {
-					return err
-				}
-				if !strings.EqualFold(origin, payload.DownloadID) {
-					return errors.New("webhook origin is not yet visible in history or does not match current file")
-				}
-			}
 			// Paths, release dates, episodes and origin are always resolved from Arr.
-			return s.auditFile(ctx, client, file)
+			return s.auditFileWithOrigin(ctx, client, file, payload.DownloadID)
 		}()
 		s.finishWebhook(key, err)
 		s.releaseFileLock(key, lock)
@@ -501,7 +487,12 @@ func (s *Service) Audit(ctx context.Context) error {
 		return errors.New("audit requires at least one worker")
 	}
 	for _, client := range s.arr {
-		files, err := client.ListSubtitleGuardFiles(ctx)
+		var files []MediaFile
+		err := retryScanReads(ctx, func() error {
+			var readErr error
+			files, readErr = client.ListSubtitleGuardFiles(ctx)
+			return readErr
+		})
 		if err != nil {
 			auditErrors = append(auditErrors, fmt.Errorf("audit %s: %w", client.Kind(), err))
 			continue
@@ -523,7 +514,7 @@ func (s *Service) Audit(ctx context.Context) error {
 			go func() {
 				defer wg.Done()
 				defer func() { <-sem }()
-				if err := s.auditFile(ctx, client, file); err != nil {
+				if err := s.auditFileWithRetries(ctx, client, file); err != nil {
 					s.log.Warn("library file left untouched or requires reconciliation", "arr", client.Kind(), "file_id", file.ID, "error", err)
 					errMu.Lock()
 					if firstErr == nil {
@@ -717,6 +708,10 @@ func writeUnmatchedReport(path string, report UnmatchedReport) error {
 }
 
 func (s *Service) auditFile(ctx context.Context, client *ArrClient, file MediaFile) error {
+	return s.auditFileWithOrigin(ctx, client, file, "")
+}
+
+func (s *Service) auditFileWithOrigin(ctx context.Context, client *ArrClient, file MediaFile, expectedDownloadID string) error {
 	if s.skipSilentMediaGuard(client, file) {
 		return nil
 	}
@@ -724,7 +719,7 @@ func (s *Service) auditFile(ctx context.Context, client *ArrClient, file MediaFi
 	if err != nil {
 		return err
 	}
-	return s.applyValidation(ctx, client, file, validation, pathOnDisk)
+	return s.applyValidationWithOrigin(ctx, client, file, validation, pathOnDisk, expectedDownloadID)
 }
 
 func (s *Service) findOrigin(ctx context.Context, client *ArrClient, file MediaFile) (string, int, error) {
@@ -786,10 +781,10 @@ func (s *Service) validate(ctx context.Context, file MediaFile) (Validation, str
 	}
 	validation, err := s.probePath(ctx, pathOnDisk)
 	if err != nil {
-		return Validation{}, pathOnDisk, fmt.Errorf("probe %s: %w", pathOnDisk, err)
+		return Validation{}, pathOnDisk, deferProcessing(fmt.Errorf("probe %s: %w", pathOnDisk, err))
 	}
 	if file.Size > 0 && validation.fileInfo != nil && validation.fileInfo.Size() != file.Size {
-		return Validation{}, pathOnDisk, errors.New("local file size does not match Arr metadata")
+		return Validation{}, pathOnDisk, deferProcessing(errors.New("local file size does not match Arr metadata"))
 	}
 	validation = applyOldMediaGrace(validation, file.Year, time.Now())
 	return validation, pathOnDisk, nil
@@ -803,6 +798,10 @@ func (s *Service) probePath(ctx context.Context, path string) (Validation, error
 }
 
 func (s *Service) applyValidation(ctx context.Context, client *ArrClient, file MediaFile, validation Validation, pathOnDisk string) error {
+	return s.applyValidationWithOrigin(ctx, client, file, validation, pathOnDisk, "")
+}
+
+func (s *Service) applyValidationWithOrigin(ctx context.Context, client *ArrClient, file MediaFile, validation Validation, pathOnDisk, expectedDownloadID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -816,10 +815,10 @@ func (s *Service) applyValidation(ctx context.Context, client *ArrClient, file M
 	}
 	fresh, err := client.GetMediaFile(ctx, file.ID)
 	if err != nil {
-		return err
+		return deferMissingMedia(err)
 	}
 	if !sameMedia(file, fresh, client.Kind()) {
-		return errors.New("media changed since probe; refusing stale validation")
+		return deferProcessing(errors.New("media changed since probe; refusing stale validation"))
 	}
 	var ids []int
 	if client.Kind() == "sonarr" {
@@ -829,18 +828,17 @@ func (s *Service) applyValidation(ctx context.Context, client *ArrClient, file M
 		}
 		ids = canonicalIDs(ids)
 		if len(ids) == 0 {
-			return errors.New("sonarr file is not assigned to any episode")
+			return deferProcessing(errors.New("sonarr file is not assigned to any episode"))
 		}
 	}
 	keys := retryKeys(client.Kind(), file, ids)
 	if validation.Valid {
 		info, err := os.Stat(pathOnDisk)
 		if err != nil || !sameDiskFile(validation.fileInfo, info) {
-			return errors.New("valid media changed or has no verified snapshot before retry-state reset")
+			return deferProcessing(errors.New("valid media changed or has no verified snapshot before retry-state reset"))
 		}
-		dir, err := os.Stat(filepath.Dir(pathOnDisk))
-		if err != nil || validation.dirInfo == nil || !os.SameFile(validation.dirInfo, dir) || !validation.dirInfo.ModTime().Equal(dir.ModTime()) {
-			return errors.New("subtitle directory changed before retry-state reset")
+		if err := validation.checkSubtitleSnapshot(pathOnDisk); err != nil {
+			return fmt.Errorf("before retry-state reset: %w", err)
 		}
 		if s.config.DryRun {
 			return nil
@@ -859,11 +857,17 @@ func (s *Service) applyValidation(ctx context.Context, client *ArrClient, file M
 	if err != nil {
 		return fmt.Errorf("resolve origin before deletion: %w", err)
 	}
+	if expectedDownloadID != "" && !strings.EqualFold(downloadID, expectedDownloadID) {
+		if downloadID == "" {
+			return deferProcessing(errors.New("webhook origin is not yet visible in history"))
+		}
+		return errors.New("webhook origin does not match current file")
+	}
 	origin, err := s.prepareOrigin(ctx, client, file, downloadID)
 	if err != nil {
 		return fmt.Errorf("origin safety preflight: %w", err)
 	}
-	s.log.Warn("subtitle validation failed", "arr", client.Kind(), "file_id", file.ID, "reason", validation.Reason, "dry_run", s.config.DryRun)
+	s.log.Warn("subtitle validation failed", "arr", client.Kind(), "file_id", file.ID, "reason", validation.Reason, "dry_run", s.config.DryRun, "arr_automatic_search", origin.automaticSearch)
 	if s.config.MaxAttempts < 1 {
 		return errors.New("invalid maximum attempts")
 	}
@@ -871,18 +875,17 @@ func (s *Service) applyValidation(ctx context.Context, client *ArrClient, file M
 	// potentially slow history/queue reads, immediately before the write boundary.
 	fresh, err = client.GetMediaFile(ctx, file.ID)
 	if err != nil {
-		return err
+		return deferMissingMedia(err)
 	}
 	if !sameMedia(file, fresh, client.Kind()) {
-		return errors.New("media changed during preflight")
+		return deferProcessing(errors.New("media changed during preflight"))
 	}
 	info, err := os.Stat(pathOnDisk)
 	if err != nil || !sameDiskFile(validation.fileInfo, info) {
-		return errors.New("local media changed or has no verified probe snapshot")
+		return deferProcessing(errors.New("local media changed or has no verified probe snapshot"))
 	}
-	dir, err := os.Stat(filepath.Dir(pathOnDisk))
-	if err != nil || validation.dirInfo == nil || !os.SameFile(validation.dirInfo, dir) || !validation.dirInfo.ModTime().Equal(dir.ModTime()) {
-		return errors.New("subtitle directory changed since probe")
+	if err := validation.checkSubtitleSnapshot(pathOnDisk); err != nil {
+		return err
 	}
 	if client.Kind() == "sonarr" {
 		currentIDs, err := client.EpisodeIDsForFile(ctx, file.ParentID, file.ID)
@@ -890,46 +893,62 @@ func (s *Service) applyValidation(ctx context.Context, client *ArrClient, file M
 			return err
 		}
 		if !slices.Equal(ids, canonicalIDs(currentIDs)) {
-			return errors.New("episode mapping changed during preflight")
+			return deferProcessing(errors.New("episode mapping changed during preflight"))
 		}
 	}
 	if s.config.DryRun {
 		return nil
 	}
 	key := operationKey(client.Kind(), file.ID)
-	op := Operation{Kind: client.Kind(), SubjectID: file.SubjectID(client.Kind()), FileID: file.ID, DownloadID: downloadID, EpisodeIDs: ids, Phase: "delete-requested"}
+	op := Operation{Kind: client.Kind(), SubjectID: file.SubjectID(client.Kind()), FileID: file.ID, DownloadID: downloadID, EpisodeIDs: ids, Phase: "delete-requested", AutomaticSearch: origin.automaticSearch}
 	attempt, started, err := s.state.Begin(key, op, keys)
 	if err != nil || !started {
 		return err
 	}
+	// Any error after Begin leaves a durable operation. Retry reads/jobs must not
+	// mistake an underlying timeout for authorization to repeat the mutation.
+	return s.finishMediaRemediation(ctx, client, file, origin, validation.Reason, key, ids, attempt)
+}
+
+func (s *Service) finishMediaRemediation(ctx context.Context, client *ArrClient, file MediaFile, origin originAction, reason, key string, ids []int, attempt int) (resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			resultErr = requireReconciliation(resultErr)
+		}
+	}()
 	if err := client.DeleteMediaFile(ctx, file.ID); err != nil {
 		return fmt.Errorf("delete outcome requires reconciliation: %w", err)
 	}
 	if err := s.state.Phase(key, "deleted"); err != nil {
 		return err
 	}
-	// The terminal rejection still blocks its origin but does not request another
-	// replacement. History preflight has disabled Arr's independent redownloads.
+	// Always finish origin remediation. Arr's automatic recovery is independent
+	// of the guard's search budget and must never be followed by a duplicate search.
 	if origin.queueID > 0 || origin.historyID > 0 {
-		if err := s.state.Phase(key, "origin-requested"); err != nil {
+		if origin.historyID > 0 {
+			// Settings may have changed during deletion. Use the latest decision
+			// and persist it before history failure can trigger a search.
+			automatic, err := client.AutomaticHistorySearch(ctx, origin.releaseSource)
+			if err != nil {
+				return fmt.Errorf("refresh origin search policy after deletion: %w", err)
+			}
+			origin.automaticSearch = automatic
+		}
+		if err := s.state.OriginRequested(key, origin.automaticSearch); err != nil {
 			return err
 		}
-		if err := s.applyOrigin(ctx, client, origin, validation.Reason); err != nil {
+		if err := s.applyOrigin(ctx, client, origin, reason); err != nil {
 			return fmt.Errorf("origin outcome requires reconciliation: %w", err)
 		}
 		if err := s.state.Phase(key, "origin-complete"); err != nil {
 			return err
 		}
 	}
-	if attempt <= s.config.MaxAttempts {
-		if err := s.searchStillMissing(ctx, client, file.SubjectID(client.Kind()), ids); err != nil {
+	if origin.automaticSearch {
+		s.log.Info("replacement search delegated to Arr; skipping guard search", "arr", client.Kind(), "file_id", file.ID, "attempt", attempt, "max_attempts", s.config.MaxAttempts)
+	} else if attempt <= s.config.MaxAttempts {
+		if err := s.searchRemaining(ctx, client, key, file.SubjectID(client.Kind()), ids); err != nil {
 			return err
-		}
-		if err := s.state.Phase(key, "search-requested"); err != nil {
-			return err
-		}
-		if err := client.SearchEpisodes(ctx, file.SubjectID(client.Kind()), ids); err != nil {
-			return fmt.Errorf("search outcome requires reconciliation: %w", err)
 		}
 	}
 	return s.state.Complete(key)

@@ -99,6 +99,11 @@ func (p Prober) Validate(ctx context.Context, filePath string) (Validation, erro
 	validation := summary.validation()
 	validation.fileInfo = after
 	validation.dirInfo = directory
+	validation.sidecars = external
+	validation.sidecarsChecked = true
+	if err := validation.checkSubtitleSnapshot(filePath); err != nil {
+		return Validation{}, err
+	}
 	return validation, nil
 }
 
@@ -167,6 +172,34 @@ func (s subtitleSummary) validation() Validation {
 
 type externalSubtitle struct {
 	Language string
+	Name     string
+	Info     os.FileInfo
+}
+
+// Directory identity must stay stable, but unrelated entries and directory mtime
+// do not affect this media's subtitle decision. Compare the matching files instead.
+func (v Validation) checkSubtitleSnapshot(mediaPath string) error {
+	dir, err := os.Stat(filepath.Dir(mediaPath))
+	if err != nil || v.dirInfo == nil || !os.SameFile(v.dirInfo, dir) {
+		return deferProcessing(errors.New("subtitle directory changed or is unavailable"))
+	}
+	if !v.sidecarsChecked {
+		return errors.New("matching subtitles have no verified snapshot")
+	}
+	current, err := discoverExternalSubtitles(mediaPath)
+	if err != nil {
+		return deferProcessing(fmt.Errorf("recheck matching subtitles: %w", err))
+	}
+	if len(current) != len(v.sidecars) {
+		return deferProcessing(errors.New("matching subtitles changed since probe"))
+	}
+	for i, subtitle := range current {
+		previous := v.sidecars[i]
+		if subtitle.Name != previous.Name || !sameDiskFile(subtitle.Info, previous.Info) {
+			return deferProcessing(errors.New("matching subtitles changed since probe"))
+		}
+	}
+	return nil
 }
 
 var subtitleExtensions = map[string]struct{}{
@@ -227,7 +260,7 @@ func discoverExternalSubtitles(filePath string) ([]externalSubtitle, error) {
 		// string that was prefix-matched, not by the original media stem length.
 		suffix := strings.TrimSuffix(lowerCandidate[len(prefix):], ext)
 		language, _ := sidecarLanguage(suffix)
-		result = append(result, externalSubtitle{Language: language})
+		result = append(result, externalSubtitle{Language: language, Name: candidate, Info: info})
 	}
 	return result, nil
 }

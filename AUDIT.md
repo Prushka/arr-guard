@@ -15,13 +15,13 @@ fixtures and temporary test media.
 | Pagination | History stopped after 1,000 records; changing/repeating queue pages could misidentify work | Paginated history/queue reads with duplicate-ID, completeness, and page-limit checks |
 | File identity | Webhook paths/IDs and stale scan records could direct deletion/search | Authoritative Arr ownership, path, file snapshot, current episode mappings, and origin checks |
 | Probe safety | Changing/incomplete files, error diagnostics despite successful exit, and unbounded output could produce false rejection or resource exhaustion | Nonempty regular files, bounded output, error-diagnostic rejection, timeout/pipe cleanup, filesystem snapshots; probe errors leave media untouched |
-| Retry accounting | Composite episode groups, inconsistent resets, or a disappearing sidecar after validation could bypass or exhaust caps | Individual episode/movie counters, conservative legacy migration, valid-file resets guarded by media and subtitle directory snapshots |
+| Retry accounting | Composite episode groups, inconsistent resets, or a disappearing sidecar after validation could bypass or exhaust caps | Individual episode/movie counters, conservative legacy migration, valid-file resets guarded by media and matching-subtitle snapshots |
 | State persistence | In-memory state changed on failed writes; multiple processes could overwrite state | Copy-on-write persistence, exclusive OS lock, flushed replacement, server binding, failure latch |
 | Partial mutation | Process failure lost post-delete work; shutdown could repeat a committed action | Durable operation phase before every mutation; uncertain outcome requires reconciliation, never blind replay |
-| Origin failure | Wrong history record or Arr automatic redownload could cause broad/duplicate searches | Confirmed grabbed history; both automatic failed-redownload flags must be off for history failure; queue uses skipRedownload |
+| Origin failure | Wrong history record or Arr automatic redownload could cause broad/duplicate searches | Confirmed grabbed history; delegate replacement to Arr when its effective automatic policy applies, otherwise issue a scoped guard search; queue uses skipRedownload |
 | Shared downloads | One queue entry could remove an entire pack while searching only one episode | Group and recheck the entire download, include all affected queue episodes, protect active/partially imported/existing media |
 | Queue recovery | Automatic destructive recovery had no retry budget | Explicit opt-in, shared retry caps, durable operation record, no success inference from disappearance |
-| Webhook lifecycle | HTTP 202 could acknowledge work lost on shutdown; one failed file prevented later files in a batch | Persist before acknowledgement, process other files after an error, bounded retries, preserve accepted jobs on stop |
+| Webhook lifecycle | HTTP 202 could acknowledge work lost on shutdown; one failed file prevented later files in a batch | Persist before acknowledgement, process other files after an error, safe deferred retries with capped backoff, preserve accepted jobs on stop |
 | Startup/scans | Recovery could start before HTTP bind succeeded; one failed Arr scan prevented the other | Bind first; bound scan concurrency and continue other configured instances |
 | History read concurrency | Concurrent dry-run and early webhook history reads caused six live request timeouts | Serialize expensive preflights and origin checks in both modes, retain parallel probes and the normal request deadline |
 | Paths/reports | UNC/case mapping bugs, Unicode byte-slicing panics, root aliases, and colliding report/state paths | Preserve mapped suffixes and UNC paths; normalize subtitle slicing; resolve scan-root aliases; reject output collisions and output inside mapped media |
@@ -31,7 +31,135 @@ The 50-year age exclusion remains a user-visible policy. It is not evidence that
 all media older than 50 years is silent. Unknown contained episode dates prevent
 an age exclusion rather than borrowing the series premiere date.
 
-## Verification
+## Automatic redownload follow-up
+
+The original audit blocked history-based remediation while either automatic
+failed-redownload setting was enabled. That restriction has been removed at the
+user's request. Remediation now completes with automatic recovery enabled:
+delete the rejected file, mark the confirmed grabbed release failed, and skip
+the guard's duplicate search when Arr is configured to search for that release.
+Interactive-search grabs use both the master and interactive settings; other
+grabs use the master setting. Queue removal still suppresses Arr's automatic
+search and uses the guard's scoped search. An already-failed origin emits no new
+failure event, so its missing file still needs a guard search.
+
+The effective policy is read before deletion and rechecked immediately before
+history failure. The journal records `automaticSearch` before the request, and
+uncertain outcomes never cause a fallback search or blind replay. Unknown
+required settings still stop remediation. Server settings are never changed.
+`MAX_ATTEMPTS` bounds guard-issued searches within remediation attempts; it
+cannot suppress Arr's independent automatic searches, including at the cap.
+Arr can search a shared release's episodes or an entire season. External changes
+between the final configuration read and the failure request remain a race that
+the API cannot make atomic.
+
+Local regression tests cover both Arr applications, release-source and setting
+combinations, settings changing during deletion, missing configuration, queue and
+already-failed origins, the retry cap, duplicate concurrent webhooks, persistence
+failure before and after history failure, uncertain-request recovery, and dry-run
+state/media preservation. `go test ./...`, `go test -race ./...`, `go vet ./...`,
+and `./lint.ps1` passed after the final changes; lint reported zero issues.
+Linux/amd64 application and test compilation passed as well. No deployment or
+production mutation was performed.
+
+Live GET-only retests of four previously blocked files (two per Arr application)
+passed actual probes, remediation preflight, and webhook processing with
+`arr_automatic_search=true`. They made **92 GET requests**, with zero mutations,
+retry-state writes, or media changes, and completed in **5.81 seconds**. Actual
+deletion/blocklisting/search behavior remains verified only by local fixtures.
+
+## Workflow recovery follow-up
+
+Five local reproductions confirmed that additional audit-added checks could stop
+legitimate work. Four have been corrected; the series-wide exclusion remains
+because safely narrowing it requires more certainty about shared-release effects.
+All mutation reproductions and regression tests use local HTTP fixtures and
+disposable media only.
+
+| Regression | Current behavior | Protection retained |
+| --- | --- | --- |
+| Unrelated directory activity invalidates a probe | Compare the matching subtitle filenames and file identity/size/mtime, ignoring directory mtime | Media and directory identity still checked; added, removed, renamed, changed, or incomplete matching sidecars require a new probe |
+| Unavailable history blocks a webhook before probing | Probe first; accept valid files without history. Rejected files with a webhook download ID wait and retry when matching history is unavailable | A conflicting origin still requires review; unavailable history cannot authorize deletion or blocklisting |
+| Any unfinished operation blocks the same Sonarr series | **Retained.** Other series and valid-file checks continue | An uncertain history failure or automatic search can affect a release/season beyond the file's mapped episodes; episode-only exclusion could overlap it |
+| One replacement aborts the entire remaining search | Re-read authoritative targets after remediation; search only missing episodes, or finish without searching when all targets have files | Unknown target identities still require reconciliation; a shared queued download containing existing media is protected before removal |
+| Five temporary webhook failures permanently exhaust work | Safe failures keep retrying with backoff capped at one hour; restart preserves them; legacy five-failure jobs resume fresh checks | Permanent identity/configuration errors and uncertain mutations pause with `needsReview`; redelivery rechecks but cannot replay a journaled mutation |
+
+Temporary network/API failures, failed probes, changed snapshots, delayed history,
+unassigned episode files, and still-importing origins are eligible for fresh checks
+before any mutation. A media-resource 404 during preflight triggers a fresh read;
+if the file is gone, its obsolete scan/job can finish without mutations.
+The delays are 1, 2, 4, 8, 16, and 32 minutes, then one hour. Failure counts saturate
+at seven for backoff; they are separate from remediation/search attempt counters.
+HTTP authentication errors, mismatched ownership/origins, missing required
+configuration, and uncertain journal entries require attention. After a mutation
+has begun, even a read timeout is treated as reconciliation work, never as a reason
+to repeat deletion, origin failure, or search.
+
+One-time scans make up to three attempts for temporary list/per-file failures.
+Per-file retries refresh metadata and probe again, bypassing webhook deduplication
+while retaining the operation journal. After one- and two-second waits, unresolved
+safe per-file work is persisted for later write-enabled serve processing with the
+same state file. The scan continues other files/servers and returns an error for
+unresolved work. Dry run never writes jobs. A failed startup or library listing
+cannot create per-file jobs; it still needs a later restart/scan. Serve mode does
+not add periodic full-library scans.
+
+Search narrowing records the actual `searchEpisodeIds` before the request. An
+uncertain search preserves those IDs for review. Detecting a replacement file does
+not validate its subtitles; a new import webhook or later scan does that. Arr-owned
+automatic searches retain Arr's scope and remain outside the guard's attempt cap.
+
+Native tests, the race detector, vet, lint, and Linux/amd64 application/test
+compilation passed after these changes; lint reported zero issues. New regression
+tests exercise unrelated directory writes,
+matching-sidecar changes despite restored directory timestamps, delayed origin
+history, partial/all replacements, shared queue protections, fresh scan retries,
+scan-to-serve recovery, more than five failures across restart, legacy exhausted-job
+upgrade, review-job redelivery, truncated-read/timeout retry classification,
+disappearing files, delayed episode assignment, mutation-failure refusal, and
+retained series exclusion.
+
+The full GET-only/dry-run pass completed in **35 minutes 27 seconds**:
+
+| Instance | Managed files | Usable probes | Policy accepted | Policy rejected | Probe errors | Age excluded | Preflight blocks |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Sonarr | 10,402 | 10,390 | 10,209 | 181 | 12 | 0 | 0 |
+| Radarr | 421 | 409 | 406 | 3 | 2 | 10 | 0 |
+| Total | 10,823 | 10,799 | 10,615 | 184 | 14 | 10 | 0 |
+
+All files were accessible with matching sizes. The 184 policy rejections reached
+remediation preflight without a blocker; they remain on the server because the
+test is read-only. The 14 ffprobe diagnostic failures were left unvalidated and
+untouched. The ten age exclusions were not probed. These counts describe this
+library snapshot; imports and other Arr activity continue independently.
+
+Real webhook processing and deliberately stale in-memory snapshot refusals passed
+on both servers. Queue dry-run checks passed with 721 Sonarr queue rows (seven
+import-blocked) and 14 Radarr rows (none import-blocked). Queue groups were only
+read and checked, never removed. The combined unmatched scan found 2,052 files
+beneath one mapped root and wrote its report to a disposable local directory.
+All live calls used forced dry run, an independent GET-only transport with
+redirects disabled, and no retry-state or server-media writes.
+
+The final targeted retest of four previously blocked files (two per server)
+passed actual probes, history preflight, and Download/ImportComplete webhook
+processing with Arr owning replacement. It completed in **3.75 seconds**, using
+**88 GET requests**, with zero mutations or retry-state writes. Actual deletion,
+blocklisting, search, recovery after API faults, and partial-mutation behavior
+remain verified by local fixtures only. No deployment was performed.
+
+Other intentional compatibility changes also need explicit operator awareness:
+queue recovery now defaults off, dry run defaults on, write serving requires
+authentication, and state/report paths and server bindings are stricter.
+Any ffprobe error output or empty/nonregular matching sidecar currently stops
+validation, even when a separate English subtitle source might suffice. Those
+probe restrictions need case-specific review before they can safely be narrowed.
+
+These remaining restrictions may leave some media unresolved. Preserving known
+state takes precedence over deleting a file with an inconclusive probe or issuing
+unbounded replacement grabs. Reconciliation instructions are in README.md.
+
+## Initial audit verification
 
 Final native unit/integration tests, the Go race detector, `go vet`, and pinned
 golangci-lint passed; lint reported zero issues. Real ffmpeg/ffprobe fixtures cover
@@ -63,18 +191,20 @@ files were left untouched and cannot be counted as successfully validated.
 The 93 policy rejections are subtitle-policy results, not a claim that those
 files are corrupt.
 
-That full pass protected 84 candidate remediations: 78 at the automatic
+That historical full pass protected 84 candidate remediations: 78 at the automatic
 failed-redownload setting check and six at the HTTP deadline. Detailed diagnostics
 reproduced all six deadline failures and identified Sonarr's
 `GET /api/v3/history/series` as the slow read (13 seconds in an isolated trace).
 
-The final concurrency fix serializes remediation preflights in both modes and
-early webhook origin-history checks, while retaining parallel media probes.
+The initial audit's concurrency fix serialized remediation preflights in both
+modes and early webhook origin-history checks, while retaining parallel probes.
+The workflow follow-up now performs those origin checks after probing.
 Regression tests first reproduced eight overlapping reads, then passed with a
 peak of one. All six affected files were submitted concurrently against the live
 server after the fix: the batch completed in **2 minutes 5 seconds** with the
 normal **30-second per-request deadline**, zero timeouts, and zero mutations.
-Each reached the expected automatic-redownload safety check. Waiting for the
+Each reached the then-required automatic-redownload safety check, since removed
+by the follow-up above. Waiting for the
 preflight lock is separate from an individual HTTP request's deadline.
 
 Real webhook processing and deliberate stale-directory snapshot refusals passed
@@ -89,7 +219,8 @@ They found no current ambiguous import histories or fully imported queue groups;
 no import-blocked queue items were present. Queue removal/recovery failures were
 therefore exercised with local fixtures. Earlier full passes completed in
 35 minutes 56 seconds and 37 minutes 22 seconds; counts changed as the library
-continued importing independently. The latest table supersedes earlier counts.
+continued importing independently. These initial-audit counts are historical;
+the workflow follow-up table above records the current verification snapshot.
 
 | Functionality | Local verification | Live read-only verification |
 | --- | --- | --- |
@@ -118,9 +249,10 @@ should manage an Arr server with the same state path. Independent state files an
 database restores require operator coordination.
 
 `DRY_RUN=true` and `RECOVER_BLOCKED_QUEUE=false` are now defaults. Write serving
-requires authentication. History failure will be refused while either Arr
-automatic failed-redownload setting is enabled or unknown. The guard never
-changes those server settings itself. Fully imported queued downloads remain
+requires authentication. History failure now supports automatic failed
+redownload, delegating its replacement search to Arr when applicable. A missing
+required setting still stops remediation; the guard never changes server
+settings itself. Fully imported queued downloads remain
 eligible; incompletely imported packs are retained.
 
 API behavior was checked against the upstream
