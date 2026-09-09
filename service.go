@@ -786,6 +786,9 @@ func (s *Service) validate(ctx context.Context, file MediaFile) (Validation, str
 	if file.Size > 0 && validation.fileInfo != nil && validation.fileInfo.Size() != file.Size {
 		return Validation{}, pathOnDisk, deferProcessing(errors.New("local file size does not match Arr metadata"))
 	}
+	if len(validation.ProbeWarnings) > 0 {
+		s.log.Warn("ffprobe recovered from video diagnostic; applying subtitle policy", "file_id", file.ID, "diagnostics", validation.ProbeWarnings)
+	}
 	validation = applyOldMediaGrace(validation, file.Year, time.Now())
 	return validation, pathOnDisk, nil
 }

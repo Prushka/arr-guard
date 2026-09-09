@@ -14,7 +14,7 @@ fixtures and temporary test media.
 | API boundary | Redirects could forward the API key; successful empty/malformed responses could create zero-value resources | Redirects disabled; independent read-only client gate; resource identity and bounded JSON validation |
 | Pagination | History stopped after 1,000 records; changing/repeating queue pages could misidentify work | Paginated history/queue reads with duplicate-ID, completeness, and page-limit checks |
 | File identity | Webhook paths/IDs and stale scan records could direct deletion/search | Authoritative Arr ownership, path, file snapshot, current episode mappings, and origin checks |
-| Probe safety | Changing/incomplete files, error diagnostics despite successful exit, and unbounded output could produce false rejection or resource exhaustion | Nonempty regular files, bounded output, error-diagnostic rejection, timeout/pipe cleanup, filesystem snapshots; probe errors leave media untouched |
+| Probe safety | Changing/incomplete files, error diagnostics despite successful exit, and unbounded output could produce false rejection or resource exhaustion | Nonempty regular files, bounded output, narrow verified video-recovery exception, actual failure diagnostics, timeout/pipe cleanup, filesystem snapshots; failed probes leave media untouched |
 | Retry accounting | Composite episode groups, inconsistent resets, or a disappearing sidecar after validation could bypass or exhaust caps | Individual episode/movie counters, conservative legacy migration, valid-file resets guarded by media and matching-subtitle snapshots |
 | State persistence | In-memory state changed on failed writes; multiple processes could overwrite state | Copy-on-write persistence, exclusive OS lock, flushed replacement, server binding, failure latch |
 | Partial mutation | Process failure lost post-delete work; shutdown could repeat a committed action | Durable operation phase before every mutation; uncertain outcome requires reconciliation, never blind replay |
@@ -151,13 +151,89 @@ remain verified by local fixtures only. No deployment was performed.
 Other intentional compatibility changes also need explicit operator awareness:
 queue recovery now defaults off, dry run defaults on, write serving requires
 authentication, and state/report paths and server bindings are stricter.
-Any ffprobe error output or empty/nonregular matching sidecar currently stops
-validation, even when a separate English subtitle source might suffice. Those
-probe restrictions need case-specific review before they can safely be narrowed.
+Unknown ffprobe error output or an empty/nonregular matching sidecar still stops
+validation, even when a separate English subtitle source might suffice. The
+recoverable video exception below narrows only the diagnosed MPEG-2 startup case.
 
 These remaining restrictions may leave some media unresolved. Preserving known
 state takes precedence over deleting a file with an inconclusive probe or issuing
 unbounded replacement grabs. Reconciliation instructions are in README.md.
+
+## Recoverable probe diagnostics — September 9
+
+The original blanket stderr check treated any ffprobe error diagnostic as a
+failed subtitle probe and discarded its text on exit status zero. A reported
+transport stream reproduced `[mpeg2video] Invalid frame dimensions 0x0.` while
+ffprobe exited successfully, reported 1440×1080 video, and detected an ARIB caption
+stream with no language tag. A larger probe budget reproduced the same findings.
+No matching subtitle sidecar was present. This is evidence of recovered video
+metadata, not proof that the captions are English or that the entire media file
+is free of corruption.
+
+The new rule requests compact metadata for all streams and permits only that
+exact error-level MPEG-2 diagnostic when ffprobe exits successfully, its JSON has
+a stream array, and every reported MPEG-2 video stream has positive dimensions.
+Each diagnostic line is checked with its codec context and severity; any other
+error still blocks validation. Subtitle classification uses only subtitle streams
+and matching sidecars. It does not infer language from `arib_caption` or any other
+codec name. Unknown-language age grace and remediation/search caps are unchanged.
+
+Allowed diagnostics are retained in `probeWarnings` and logged as warnings.
+Failures include their actual diagnostic text, deduplicated, without memory
+addresses, and capped at 2,048 characters for logging. Classification uses the full
+captured stderr before logging truncation. Existing stdout/stderr limits, exit
+status checks, timeout/cancellation, and media/sidecar snapshots remain enforced.
+The ffprobe child disables report and forced-color environment settings, so
+`FFREPORT` cannot cause hidden report writes and ANSI coloring cannot change the
+classification. The requested `repeat+level+error` logging supplies severity on
+each message and avoids suppressed repeat summaries.
+
+The exception is based on the observed file and the
+[FFmpeg 7.1.1 MPEG decoder](https://github.com/FFmpeg/FFmpeg/blob/n7.1.1/libavcodec/mpeg12dec.c),
+which logs that error before dimensions are available. The
+[ffprobe documentation](https://ffmpeg.org/ffprobe.html) distinguishes error-level
+diagnostics, which can be recoverable, from process failure. Other video, audio,
+subtitle, and container diagnostics remain protected until separately understood
+and tested; exit status zero alone is insufficient to bypass them.
+
+Local tests cover English/non-English/absent/ARIB subtitles, matching and unrelated
+sidecars, English audio metadata, positive/zero/missing/multiple video dimensions,
+wrong context/severity, mixed and unknown errors, nonzero exit, malformed JSON,
+late errors after repeated allowed lines, output limits, stale sidecars, log
+formatting, actual local remediation/reset paths for both Arr applications, and
+real ffprobe fixtures with implicit reporting disabled. `go test ./...`,
+`go test -race ./...`, `go vet ./...`, and `./lint.ps1` passed; lint reported zero
+issues. Linux/amd64 application and test binaries compiled successfully.
+
+Completed live checks used forced dry run, independently enforced GET-only HTTP
+transports, and disabled redirects:
+
+- The exact reported Sonarr file was resolved using GETs and tested twice, then
+  exercised through scan and webhook remediation preflight: 23 GETs in 31.55
+  seconds. The known video diagnostic became a warning. Unidentified ARIB
+  captions remained a normal subtitle-policy rejection; no English language was
+  inferred and no replacement was actually requested.
+- A final 19-file diagnostic pass completed in 16.02 seconds with 125 GETs.
+  Five files reached normal policy rejection and both preflights, including the
+  recovered example. The other 14 reproduced their protected probe failures.
+  Repeated probes agreed, and successful probes had zero preflight blocks.
+  An earlier candidate-only run failed its reported-file membership expectation;
+  GET lookup identified the actual file before these successful retests.
+- A separate compatibility pass completed in 194.21 seconds: 10,499 Sonarr and
+  422 Radarr managed files were accessible, with zero size mismatches. Both
+  servers passed a real valid-file probe/webhook dry run and stale-directory
+  snapshot refusal using only an injected in-memory snapshot. Queue reads found
+  221 Sonarr rows (35 import-blocked) and 17 Radarr rows (two import-blocked).
+  The pass made 977 Sonarr and 482 Radarr GETs; those queue counts describe
+  existing server state, not successful queue remediation.
+
+All live checks made **zero API mutations, retry-state writes, or media changes**.
+This follow-up did not repeat the earlier full-library subtitle scan. Mutation
+sequences were verified only against local HTTP fixtures. Actual probes used the
+configured Windows ffprobe build (`2026-05-28-git-7b46c6a2a3`); Linux runtime and
+Docker execution were not exercised, and no deployment was performed. Unknown
+diagnostics still defer work for retry and require separate diagnosis if they
+persist; the new exception is deliberately limited to the verified recovery.
 
 ## Initial audit verification
 

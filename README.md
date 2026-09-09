@@ -133,8 +133,16 @@ have succeeded merely because its queue entry disappeared.
    `.usf`, `.scc`, `.stl`, and `.mks`. Empty/nonregular matching sidecars stop
    validation, allowing incomplete imports to finish. Image pixels are not OCR'd;
    stream language/title metadata and sidecar filenames determine language.
-   Error-level ffprobe diagnostics stop validation even when the process exits
-   successfully; malformed output, cancellation, and timeouts also stop it.
+   A successful probe can continue past the exact MPEG-2 video diagnostic
+   `Invalid frame dimensions 0x0.` only when every reported MPEG-2 video stream
+   has recovered positive dimensions and no other error is present. The app logs
+   that diagnostic as a warning and applies the normal subtitle policy. Other
+   diagnostics, nonzero exit status, malformed output, cancellation, and timeouts
+   still stop validation. Failure logs now include the actual diagnostic text,
+   with duplicate lines removed and long output truncated for logging; the full
+   bounded output is checked before that truncation. ARIB and other codec names
+   do not establish subtitle language. Probes also disable inherited `FFREPORT`
+   settings to prevent implicit report-file writes.
 3. Accept English subtitles (`en`, `eng`, `en-US`, `English`). For media more than
    ten years old, at least one unidentified subtitle language also qualifies.
    Known non-English subtitles alone do not qualify for that grace rule, and
@@ -293,6 +301,13 @@ server, set `ARR_LIVE_REMEDIATION_IDS=sonarr:123,radarr:456` using actual scan I
 and run `go test -run '^TestLiveRemediationSearchOwnership$' -v -timeout 15m`
 with `ARR_LIVE_READ_ONLY=1`. At most 20 files are accepted. This checks real
 probes, history preflights, and webhook processing using only GET/dry-run calls.
+To check recoverable probe diagnostics, set `ARR_LIVE_PROBE_IDS=sonarr:123,radarr:456`
+and run `go test -run '^TestLiveProbeDiagnostics$' -v -timeout 20m` with the same
+read-only opt-in. It repeats each probe, compares decisions, and runs scan/webhook
+preflight for successfully probed files. `ARR_LIVE_PROBE_PATH` can optionally
+identify a Sonarr file by its reported Arr path; the harness resolves and adds its
+ID using GETs without printing the path. The combined limit is 20 files. Review
+the reported blocked-probe/preflight counts even if the harness passes.
 See [AUDIT.md](AUDIT.md) for the audit's results and limitations.
 
 Repository references checked for this implementation:

@@ -28,6 +28,8 @@ launch/lint scripts and Docker deployment files. No generated API client is used
 - `config.go`: environment configuration and redacted logging.
 - `arr.go`, `model.go`: v3 API requests and resource models.
 - `probe.go`: ffprobe and matching subtitle sidecars; no media writes.
+- `probe_diagnostics.go`: exact recoverable-video diagnostic classification and
+  bounded diagnostic logging; unknown/subtitle/container failures remain protected.
 - `service.go`: webhooks, library/unmatched scans, queue recovery, remediation.
 - `state.go`: retry state and atomic JSON persistence.
 - `safety.go`: identity, history/redownload, and filesystem preflight checks.
@@ -78,6 +80,12 @@ passes; completion does not mean every probe or remediation preflight succeeded.
 - A valid probe may reset retry counters only while its media and
   matching-subtitle snapshots still match; a changed/missing snapshot preserves
   counters. Ignore unrelated directory mtime changes, retain directory identity.
+- A successful ffprobe may continue past only the exact MPEG-2 error-level
+  `Invalid frame dimensions 0x0.` diagnostic when all reported MPEG-2 video streams
+  have positive dimensions. Keep severity/context, complete JSON, output bounds,
+  and snapshots enforced. Other diagnostics still fail with their actual text.
+  Never infer a subtitle language from the codec name. Disable FFREPORT and forced
+  color in the ffprobe child process; probes must not create report files.
 - Bind the HTTP listener before starting workers. Stop cancels in-flight probes
   and leaves accepted durable jobs available for the next start.
 - State persistence failure disables subsequent state writes in that process. One
@@ -130,3 +138,15 @@ Sonarr queue rows), and the combined unmatched scan passed. A final four-file
 history/search-ownership and webhook retest passed with 88 GETs. All live tests
 made zero API mutations, retry-state writes, or media changes. AUDIT.md separates
 these read-only results from mutation behavior verified only by local fixtures.
+
+Recoverable probe diagnostics passed native tests, race detection, vet, lint
+(zero issues), and Linux/amd64 application/test compilation. The reported MPEG-2
+file passed repeated real probes and both scan/webhook remediation preflights.
+A targeted 19-file live pass made 125 GETs: five normal policy rejections reached
+preflight, including that recovered file; 14 other probe failures remained
+protected, and no successful probe was blocked at preflight. A separate library
+compatibility pass checked 10,921 accessible files with no size mismatches, plus
+sample valid probes, webhooks, stale-snapshot refusal, and queue reads on both
+servers. These tests made zero API mutations, retry-state writes, or media changes.
+This was targeted probe verification, not another full-library probe pass;
+AUDIT.md records the results and the remaining Linux/runtime verification limits.

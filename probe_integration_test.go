@@ -64,12 +64,18 @@ func TestRealFFprobeSubtitleMatrix(t *testing.T) {
 				}
 			}
 			p := Prober{Path: ffprobe, Timeout: 10 * time.Second}
+			reportPath := filepath.Join(dir, "probe-report.log")
+			t.Setenv("FFREPORT", "file="+strings.ReplaceAll(filepath.ToSlash(reportPath), ":", `\:`))
+			t.Setenv("AV_LOG_FORCE_COLOR", "1")
 			v, err := p.Validate(t.Context(), media)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if v.Valid != test.valid || v.HasSubtitles != test.hasSubtitles || v.fileInfo == nil || v.dirInfo == nil {
 				t.Fatalf("unexpected validation: %+v", v)
+			}
+			if _, err := os.Stat(reportPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("read-only probe created an implicit report")
 			}
 		})
 	}

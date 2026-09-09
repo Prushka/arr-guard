@@ -41,15 +41,15 @@ func (p Prober) Validate(ctx context.Context, filePath string) (Validation, erro
 	defer cancel()
 
 	cmd := exec.CommandContext(probeCtx, p.Path,
-		"-v", "error",
+		"-v", "repeat+level+error",
 		"-protocol_whitelist", "file,pipe,crypto",
-		// Only subtitle streams are relevant; avoiding audio/video metadata
-		// keeps probes small without limiting subtitle discovery.
-		"-select_streams", "s",
-		"-show_entries", "stream=codec_type,codec_name:stream_tags=language,title:stream_disposition=default,forced,hearing_impaired",
+		// Include compact video metadata to verify recovery from a known decoder
+		// startup error. Only subtitle streams contribute to the language decision.
+		"-show_entries", "stream=codec_type,codec_name,width,height:stream_tags=language,title:stream_disposition=default,forced,hearing_impaired",
 		"-of", "json",
 		"-i", filePath,
 	)
+	cmd.Env = probeEnvironment()
 	stdout := limitedBuffer{limit: 4 << 20}
 	stderr := limitedBuffer{limit: 64 << 10}
 	cmd.Stdout = &stdout
@@ -57,20 +57,21 @@ func (p Prober) Validate(ctx context.Context, filePath string) (Validation, erro
 	cmd.WaitDelay = 2 * time.Second
 	if err := cmd.Run(); err != nil {
 		if probeCtx.Err() != nil {
-			return Validation{}, fmt.Errorf("ffprobe interrupted: %w", probeCtx.Err())
+			return Validation{}, withProbeDiagnostics(fmt.Errorf("ffprobe interrupted: %w", probeCtx.Err()), stderr.String())
 		}
-		return Validation{}, fmt.Errorf("ffprobe: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	if stderr.Len() > 0 {
-		return Validation{}, errors.New("ffprobe reported media errors; subtitle absence is not trustworthy")
+		return Validation{}, withProbeDiagnostics(fmt.Errorf("ffprobe: %w", err), stderr.String())
 	}
 
 	var result ProbeResult
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		return Validation{}, fmt.Errorf("decode ffprobe output: %w", err)
+		return Validation{}, withProbeDiagnostics(fmt.Errorf("decode ffprobe output: %w", err), stderr.String())
 	}
 	if result.Streams == nil {
-		return Validation{}, errors.New("ffprobe output is missing the streams array")
+		return Validation{}, withProbeDiagnostics(errors.New("ffprobe output is missing the streams array"), stderr.String())
+	}
+	warnings, err := classifyProbeDiagnostics(stderr.String(), result.Streams)
+	if err != nil {
+		return Validation{}, err
 	}
 
 	summary := newSubtitleSummary()
@@ -97,6 +98,7 @@ func (p Prober) Validate(ctx context.Context, filePath string) (Validation, erro
 		return Validation{}, errors.New("media changed during probe")
 	}
 	validation := summary.validation()
+	validation.ProbeWarnings = warnings
 	validation.fileInfo = after
 	validation.dirInfo = directory
 	validation.sidecars = external
