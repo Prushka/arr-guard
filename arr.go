@@ -367,13 +367,21 @@ func (c *ArrClient) DownloadHistory(ctx context.Context, downloadID string) ([]H
 }
 
 func (c *ArrClient) Queue(ctx context.Context) ([]QueueRecord, error) {
-	return readArrPages(ctx, c, "queue", url.Values{"sortKey": {"timeleft"}, "sortDirection": {"ascending"}}, func(q QueueRecord) int { return q.ID })
+	query := url.Values{"sortKey": {"timeleft"}, "sortDirection": {"ascending"}}
+	if c.Kind() == "sonarr" {
+		query.Set("includeUnknownSeriesItems", "true")
+	} else {
+		query.Set("includeUnknownMovieItems", "true")
+	}
+	return readArrPages(ctx, c, "queue", query, func(q QueueRecord) int { return q.ID })
 }
 func (c *ArrClient) FailQueueItem(ctx context.Context, id int, message string) error {
 	if id < 1 {
 		return errors.New("queue ID must be positive")
 	}
 	query := url.Values{
+		// Ask Arr to remove the client task and its downloaded files, including
+		// partially imported packs. Managed library files are separate.
 		"removeFromClient": {"true"},
 		"blocklist":        {"true"},
 		// The sidecar submits the replacement search explicitly after this

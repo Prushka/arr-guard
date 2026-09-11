@@ -78,17 +78,39 @@ func (q QueueRecord) needsImportRecovery() bool {
 	if strings.EqualFold(strings.TrimSpace(q.TrackedDownloadState), "importBlocked") {
 		return true
 	}
+	state := strings.ToLower(strings.TrimSpace(q.TrackedDownloadState))
+	if state != "" && state != "importpending" {
+		return false
+	}
 	for _, status := range q.StatusMessages {
-		if containsImportBlockedText(status.Title) {
+		if containsImportBlockedText(status.Title) || containsRecoverableImportText(status.Title) {
 			return true
 		}
 		for _, message := range status.Messages {
-			if containsImportBlockedText(message) {
+			if containsImportBlockedText(message) || containsRecoverableImportText(message) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func containsRecoverableImportText(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, prefix := range []string{
+		"not an upgrade for existing episode",
+		"not an upgrade for existing movie",
+		"no files found are eligible for import",
+		"not a quality revision upgrade for existing episode",
+		"not a quality revision upgrade for existing movie",
+		"unable to parse file",
+		"unable to determine if file is a sample",
+	} {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return strings.Contains(value, " was unexpected considering the ")
 }
 
 func containsImportBlockedText(value string) bool {

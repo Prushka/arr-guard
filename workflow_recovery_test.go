@@ -178,7 +178,7 @@ func TestMovieReplacementCompletesWithoutDuplicateSearch(t *testing.T) {
 	}
 }
 
-func TestQueueRemovalKeepsPreflightProtectionButFiltersLaterReplacements(t *testing.T) {
+func TestQueueRemovalFiltersLaterReplacementsAndPreservesExistingMedia(t *testing.T) {
 	f := newSafetyFixture(t, "sonarr")
 	f.deleted = true
 	f.queue = []QueueRecord{{ID: 7, DownloadID: "origin", SeriesID: 3, EpisodeID: 10, Status: "completed", TrackedDownloadState: "importBlocked"}, {ID: 8, DownloadID: "origin", SeriesID: 3, EpisodeID: 12, Status: "completed", TrackedDownloadState: "importBlocked"}}
@@ -193,11 +193,11 @@ func TestQueueRemovalKeepsPreflightProtectionButFiltersLaterReplacements(t *test
 	if len(f.commands) != 1 || !slices.Equal(f.commands[0].EpisodeIDs, []int{12}) || len(f.service.state.Pending()) != 0 {
 		t.Fatal("post-removal replacements blocked remaining search")
 	}
-	// A pack containing existing media before removal remains protected.
+	// Existing media is preserved without requiring another replacement search.
 	f = newSafetyFixture(t, "sonarr")
 	f.queue = []QueueRecord{{ID: 7, DownloadID: "origin", SeriesID: 3, EpisodeID: 10, Status: "completed", TrackedDownloadState: "importBlocked"}}
-	if err := f.service.recoverBlockedQueueItem(t.Context(), f.client, f.queue[0]); err == nil || len(f.mutations) != 0 {
-		t.Fatal("existing media did not protect queue removal")
+	if err := f.service.recoverBlockedQueueItem(t.Context(), f.client, f.queue[0]); err != nil || len(f.mutations) != 1 || len(f.commands) != 0 || len(f.service.state.state.Attempts) != 0 {
+		t.Fatal("existing media cleanup searched or charged a retry", err)
 	}
 }
 

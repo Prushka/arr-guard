@@ -205,6 +205,7 @@ func (s *Service) recoverBlockedQueue(ctx context.Context, client *ArrClient) er
 
 	var firstErr error
 	recovered := 0
+	searched := map[string]bool{}
 	seen := map[string]bool{}
 	for _, item := range queue {
 		if !item.needsImportRecovery() {
@@ -215,7 +216,7 @@ func (s *Service) recoverBlockedQueue(ctx context.Context, client *ArrClient) er
 			continue
 		}
 		seen[key] = true
-		if err := s.recoverBlockedQueueItem(ctx, client, item); err != nil {
+		if err := s.recoverQueueItem(ctx, client, item, searched); err != nil {
 			s.log.Error("blocked queue item recovery failed", "arr", client.Kind(), "queue_id", item.ID, "download_id", item.DownloadID, "error", err)
 			if firstErr == nil {
 				firstErr = err
@@ -228,91 +229,6 @@ func (s *Service) recoverBlockedQueue(ctx context.Context, client *ArrClient) er
 	return firstErr
 }
 
-func (s *Service) recoverBlockedQueueItem(ctx context.Context, client *ArrClient, item QueueRecord) (resultErr error) {
-	if !item.needsImportRecovery() {
-		return nil
-	}
-	if item.ID < 1 || item.DownloadID == "" {
-		return errors.New("queue/download identity is missing")
-	}
-	s.mutationMu.Lock()
-	defer s.mutationMu.Unlock()
-	queue, err := client.Queue(ctx)
-	if err != nil {
-		return err
-	}
-	var subjectID int
-	var ids []int
-	found := false
-	for _, current := range queue {
-		if !strings.EqualFold(current.DownloadID, item.DownloadID) {
-			continue
-		}
-		if current.ID == item.ID {
-			found = true
-		}
-		if !current.needsImportRecovery() {
-			return errors.New("shared download still has active or importable items")
-		}
-		currentSubject := current.MovieID
-		if client.Kind() == "sonarr" {
-			currentSubject = current.SeriesID
-			if current.EpisodeID < 1 {
-				return errors.New("shared queue item has no episode mapping")
-			}
-			ids = append(ids, current.EpisodeID)
-		}
-		if currentSubject < 1 || (subjectID != 0 && subjectID != currentSubject) {
-			return errors.New("shared download has ambiguous subject mapping")
-		}
-		subjectID = currentSubject
-	}
-	if !found {
-		return nil
-	}
-	if (client.Kind() == "radarr" && subjectID != item.MovieID) || (client.Kind() == "sonarr" && subjectID != item.SeriesID) {
-		return errors.New("queue subject changed since scan")
-	}
-	ids = canonicalIDs(ids)
-	if err := s.searchStillMissing(ctx, client, subjectID, ids); err != nil {
-		return err
-	}
-	file := MediaFile{ParentID: subjectID, MovieID: subjectID}
-	keys := retryKeys(client.Kind(), file, ids)
-	s.log.Warn("blocked download recovery planned", "arr", client.Kind(), "queue_id", item.ID, "episodes", len(ids), "dry_run", s.config.DryRun)
-	if s.config.DryRun {
-		return nil
-	}
-	if s.config.MaxAttempts < 1 {
-		return errors.New("invalid maximum attempts")
-	}
-	for _, key := range keys {
-		if s.state.Attempts(key) >= s.config.MaxAttempts {
-			return errors.New("blocked download retry limit reached; left untouched")
-		}
-	}
-	key := client.Kind() + ":queue:" + strings.ToLower(item.DownloadID)
-	op := Operation{Kind: client.Kind(), SubjectID: subjectID, DownloadID: item.DownloadID, EpisodeIDs: ids, Phase: "queue-removal-requested"}
-	_, started, err := s.state.Begin(key, op, keys)
-	if err != nil || !started {
-		return err
-	}
-	defer func() {
-		if resultErr != nil {
-			resultErr = requireReconciliation(resultErr)
-		}
-	}()
-	if err := client.FailQueueItem(ctx, item.ID, "Subtitle Guard: unable to import automatically"); err != nil {
-		return fmt.Errorf("queue removal outcome requires reconciliation: %w", err)
-	}
-	if err := s.state.Phase(key, "queue-removed"); err != nil {
-		return err
-	}
-	if err := s.searchRemaining(ctx, client, key, subjectID, ids); err != nil {
-		return err
-	}
-	return s.state.Complete(key)
-}
 func (s *Service) Enqueue(client *ArrClient, payload WebhookPayload) error {
 	s.enqueueMu.Lock()
 	defer s.enqueueMu.Unlock()
@@ -532,6 +448,11 @@ func (s *Service) Audit(ctx context.Context) error {
 			auditErrors = append(auditErrors, fmt.Errorf("audit %s: %w", client.Kind(), firstErr))
 		}
 		s.log.Info("library scan complete", "arr", client.Kind())
+		if s.config.RecoverBlockedQueue {
+			if err := s.recoverBlockedQueue(ctx, client); err != nil {
+				auditErrors = append(auditErrors, fmt.Errorf("recover %s queue: %w", client.Kind(), err))
+			}
+		}
 	}
 	return errors.Join(auditErrors...)
 }

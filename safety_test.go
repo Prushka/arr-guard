@@ -143,6 +143,7 @@ type safetyFixture struct {
 	autoRedownload        bool
 	interactiveRedownload bool
 	configResponse        any
+	emptyQueueHistory     bool
 }
 
 func newSafetyFixture(t *testing.T, kind string) *safetyFixture {
@@ -220,7 +221,15 @@ func newSafetyFixture(t *testing.T, kind string) *safetyFixture {
 		case r.Method == http.MethodGet && (r.URL.Path == "/api/v3/history/movie" || r.URL.Path == "/api/v3/history/series"):
 			respond(f.history)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/history":
-			respond(HistoryPage{Records: f.history, TotalRecords: len(f.history)})
+			history := f.history
+			if len(history) == 0 && !f.emptyQueueHistory {
+				for i, q := range f.queue {
+					if strings.EqualFold(q.DownloadID, r.URL.Query().Get("downloadId")) {
+						history = append(history, HistoryRecord{ID: 1000 + i, DownloadID: q.DownloadID, SeriesID: q.SeriesID, MovieID: q.MovieID, EpisodeID: q.EpisodeID, EventType: "grabbed"})
+					}
+				}
+			}
+			respond(HistoryPage{Records: history, TotalRecords: len(history)})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/queue":
 			respond(QueuePage{Records: f.queue, TotalRecords: len(f.queue)})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/config/downloadclient":
@@ -236,7 +245,18 @@ func newSafetyFixture(t *testing.T, kind string) *safetyFixture {
 			if r.URL.Query().Get("blocklist") != "true" || r.URL.Query().Get("skipRedownload") != "true" || r.URL.Query().Get("removeFromClient") != "true" {
 				t.Error("unsafe queue flags")
 			}
-			f.queue = []QueueRecord{}
+			id, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/api/v3/queue/"))
+			origin := ""
+			for _, q := range f.queue {
+				if q.ID == id {
+					origin = q.DownloadID
+				}
+			}
+			if origin == "" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			f.queue = slices.DeleteFunc(f.queue, func(q QueueRecord) bool { return strings.EqualFold(q.DownloadID, origin) })
 			w.WriteHeader(204)
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v3/history/failed/"):
 			w.WriteHeader(204)
@@ -528,8 +548,8 @@ func TestCancellationBeforeMutationDoesNotChangeState(t *testing.T) {
 	}
 }
 
-func TestQueueRecoveryRefusesSharedActiveAndExistingMedia(t *testing.T) {
-	for _, scenario := range []string{"activeSibling", "existingMedia", "retryLimit", "uncertainDelete"} {
+func TestQueueRecoveryRefusesSharedActiveAndUncertainMutations(t *testing.T) {
+	for _, scenario := range []string{"activeSibling", "retryLimit", "uncertainDelete"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newSafetyFixture(t, "sonarr")
 			f.deleted = true
@@ -541,8 +561,6 @@ func TestQueueRecoveryRefusesSharedActiveAndExistingMedia(t *testing.T) {
 				q.EpisodeID = 12
 				q.Status = "downloading"
 				f.queue = append(f.queue, q)
-			case "existingMedia":
-				f.deleted = false
 			case "retryLimit":
 				for i := 0; i < 3; i++ {
 					if _, err := f.service.state.Increment("sonarr:episodes:10"); err != nil {

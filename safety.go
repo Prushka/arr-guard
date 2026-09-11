@@ -300,17 +300,6 @@ func openServiceState(cfg Config) (*StateStore, error) {
 	return s, nil
 }
 
-func (s *Service) searchStillMissing(ctx context.Context, c *ArrClient, subjectID int, ids []int) error {
-	remaining, needed, err := s.remainingSearchTargets(ctx, c, subjectID, ids)
-	if err != nil {
-		return err
-	}
-	if !needed || (c.Kind() == "sonarr" && len(remaining) != len(canonicalIDs(ids))) {
-		return errors.New("queue recovery target has existing media; leaving shared download untouched")
-	}
-	return nil
-}
-
 func (s *Service) remainingSearchTargets(ctx context.Context, c *ArrClient, subjectID int, ids []int) ([]int, bool, error) {
 	if c.Kind() == "sonarr" {
 		episodes, err := c.sonarrEpisodes(ctx, subjectID)

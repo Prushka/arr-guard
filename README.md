@@ -107,17 +107,54 @@ Arr is unavailable during startup, a later restart or scan is needed. Serve mode
 handles import webhooks and saved work; it does not periodically rescan the library.
 
 Queue recovery is disabled by default. Set `RECOVER_BLOCKED_QUEUE=true` to inspect
-blocked completed downloads at startup and hourly in `MODE=serve`. This is a
+blocked completed downloads at startup and hourly in `MODE=serve`, and after each
+successfully listed library in a one-time `MODE=subtitles` scan. This is a
 separate policy: an import can be blocked by a permissions problem or a valid
 release needing manual selection, so review dry-run output before opting in.
 
-Recovery uses paginated queue reads, groups all entries sharing a download ID,
-and rechecks their state. Every entry must still be blocked, belong to the same
-subject, and have no managed replacement. One queue removal/blocklist is followed
-by a movie search or an episode search covering the affected queue episodes that
-are still missing. Replacements arriving after removal are omitted from the search.
-`MAX_ATTEMPTS` applies to this path too. A failed removal is never inferred to
-have succeeded merely because its queue entry disappeared.
+Completed `importBlocked` downloads remain eligible. Completed `importPending`
+("Waiting to Import") downloads also qualify when Arr reports one of these reasons:
+
+- Not an upgrade for an existing episode/movie.
+- No files found are eligible for import.
+- Not a quality revision upgrade for an existing episode/movie.
+- Unable to parse file.
+- A quality "was unexpected considering the" grabbed release.
+- Unable to determine if file is a sample.
+
+Recovery groups every queue row sharing the download ID, including unknown-item
+rows, and resolves the full episode/movie scope using current queue and grabbed/
+import history. History may resolve a missing queue subject or episode mapping;
+conflicting identities, missing grabbed history, active imports, or shared rows
+still waiting without a recognized rejection stop recovery. It rechecks the group
+before mutation. These reasons authorize replacement policy; they do not prove
+that a download is corrupt or distinguish an empty folder from a filesystem issue.
+
+Shared-download checks cover only the Arr instance being processed. They do not
+check whether another Sonarr/Radarr instance needs the same download-client task.
+Removing one queue entry removes the whole client download and can interrupt that
+other instance. Sonarr queue rows also share the download's status; they are not
+independent per-file readiness checks. Cross-instance coordination is not implemented.
+
+For a partial import, some episodes in a download pack have been imported while
+others are still missing. Recovery blocklists the failed release and searches
+only its missing episodes. Every queue removal uses `removeFromClient=true`,
+asking Arr to remove the download-client task and its downloaded files, including
+partially imported packs and downloads whose targets all have media. Imported
+library files are retained; the guard does not directly delete download files.
+If all targets already have files, queue recovery performs no replacement search
+and consumes no retry attempts. File presence is not a subtitle-policy pass;
+normal library scans and import webhooks still validate those files separately.
+
+The queue request always uses `blocklist=true` and `skipRedownload=true`. Searches
+omit current replacements, other downloads already in progress, and targets
+already searched during the same queue scan. Replacements arriving after removal
+are rechecked too. `MAX_ATTEMPTS` applies only to the missing targets reserved for
+a guard search; already-present episodes cannot exhaust a partial pack's budget.
+Exhausted missing targets remain protected. A failed removal or search is never
+replayed after an uncertain result or restart. Dry run makes no API or retry-state
+writes. No configuration defaults changed for this feature; actual remediation
+also requires `DRY_RUN=false`.
 
 ## Remediation behavior
 
@@ -193,7 +230,8 @@ have succeeded merely because its queue entry disappeared.
    search. Arr's automatic redownload can still search at that point: its searches
    are controlled by Arr's settings and cannot be capped by the guard through the
    history-failure API. Queue recovery stops before removing another download
-   once its limit is reached.
+   when a needed search target has reached its limit; cleanup of all-existing
+   targets does not require another search attempt.
 
 Sonarr's failure endpoints can blocklist an entire shared release. The sidecar
 scopes its own searches to affected episodes, but Arr's automatic recovery can
@@ -308,6 +346,12 @@ preflight for successfully probed files. `ARR_LIVE_PROBE_PATH` can optionally
 identify a Sonarr file by its reported Arr path; the harness resolves and adds its
 ID using GETs without printing the path. The combined limit is 20 files. Review
 the reported blocked-probe/preflight counts even if the harness passes.
+For current queue recovery plans, set `ARR_LIVE_QUEUE_RECOVERY=1` and run
+`go test -run '^TestLiveQueueRecovery$' -v -timeout 15m` with
+`ARR_LIVE_READ_ONLY=1`. It reports partial/all-existing groups, missing search
+targets, duplicate-search suppression, and preflight refusal categories using
+GET-only dry runs and an empty in-memory retry state. It cannot verify the running
+deployment's retry limits or uncertain operation journal.
 See [AUDIT.md](AUDIT.md) for the audit's results and limitations.
 
 Repository references checked for this implementation:

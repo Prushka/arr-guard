@@ -185,6 +185,7 @@ func (c Config) logValue() slog.Value {
 		slog.Int("workers", c.Workers),
 		slog.Int("max_attempts", c.MaxAttempts),
 		slog.Bool("dry_run", c.DryRun),
+		slog.Bool("recover_blocked_queue", c.RecoverBlockedQueue),
 	)
 }
 

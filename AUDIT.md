@@ -19,8 +19,8 @@ fixtures and temporary test media.
 | State persistence | In-memory state changed on failed writes; multiple processes could overwrite state | Copy-on-write persistence, exclusive OS lock, flushed replacement, server binding, failure latch |
 | Partial mutation | Process failure lost post-delete work; shutdown could repeat a committed action | Durable operation phase before every mutation; uncertain outcome requires reconciliation, never blind replay |
 | Origin failure | Wrong history record or Arr automatic redownload could cause broad/duplicate searches | Confirmed grabbed history; delegate replacement to Arr when its effective automatic policy applies, otherwise issue a scoped guard search; queue uses skipRedownload |
-| Shared downloads | One queue entry could remove an entire pack while searching only one episode | Group and recheck the entire download, include all affected queue episodes, protect active/partially imported/existing media |
-| Queue recovery | Automatic destructive recovery had no retry budget | Explicit opt-in, shared retry caps, durable operation record, no success inference from disappearance |
+| Shared downloads | One queue entry could remove an entire pack while searching only one episode | Resolve queue/history scope, recheck the group, refuse active/ambiguous items, retain imported library files, and search only missing targets; queue removal also requests client task/file deletion |
+| Queue recovery | Automatic destructive recovery had no retry budget; pending rejections and partial imports could remain stuck | Explicit opt-in, selected pending-rejection recovery, missing-target retry caps, durable operation record, no success inference from disappearance |
 | Webhook lifecycle | HTTP 202 could acknowledge work lost on shutdown; one failed file prevented later files in a batch | Persist before acknowledgement, process other files after an error, safe deferred retries with capped backoff, preserve accepted jobs on stop |
 | Startup/scans | Recovery could start before HTTP bind succeeded; one failed Arr scan prevented the other | Bind first; bound scan concurrency and continue other configured instances |
 | History read concurrency | Concurrent dry-run and early webhook history reads caused six live request timeouts | Serialize expensive preflights and origin checks in both modes, retain parallel probes and the normal request deadline |
@@ -81,7 +81,7 @@ disposable media only.
 | Unrelated directory activity invalidates a probe | Compare the matching subtitle filenames and file identity/size/mtime, ignoring directory mtime | Media and directory identity still checked; added, removed, renamed, changed, or incomplete matching sidecars require a new probe |
 | Unavailable history blocks a webhook before probing | Probe first; accept valid files without history. Rejected files with a webhook download ID wait and retry when matching history is unavailable | A conflicting origin still requires review; unavailable history cannot authorize deletion or blocklisting |
 | Any unfinished operation blocks the same Sonarr series | **Retained.** Other series and valid-file checks continue | An uncertain history failure or automatic search can affect a release/season beyond the file's mapped episodes; episode-only exclusion could overlap it |
-| One replacement aborts the entire remaining search | Re-read authoritative targets after remediation; search only missing episodes, or finish without searching when all targets have files | Unknown target identities still require reconciliation; a shared queued download containing existing media is protected before removal |
+| One replacement aborts the entire remaining search | Re-read authoritative targets after remediation; search only missing episodes, or finish without searching when all targets have files | Unknown target identities still require reconciliation; partial-queue recovery retains imported library files while removing rejected client downloads |
 | Five temporary webhook failures permanently exhaust work | Safe failures keep retrying with backoff capped at one hour; restart preserves them; legacy five-failure jobs resume fresh checks | Permanent identity/configuration errors and uncertain mutations pause with `needsReview`; redelivery rechecks but cannot replay a journaled mutation |
 
 Temporary network/API failures, failed probes, changed snapshots, delayed history,
@@ -234,6 +234,131 @@ configured Windows ffprobe build (`2026-05-28-git-7b46c6a2a3`); Linux runtime an
 Docker execution were not exercised, and no deployment was performed. Unknown
 diagnostics still defer work for retry and require separate diagnosis if they
 persist; the new exception is deliberately limited to the verified recovery.
+
+## Partial and waiting-import queue recovery — September 9
+
+The user's six selected rejection families now qualify completed `importPending`
+rows for recovery: existing-file upgrade/revision rejection, no eligible files,
+file parsing failure, unexpected quality, and inability to determine whether a
+file is a sample. Episode and movie variants of upgrade messages are accepted.
+An ordinary pending import or an import already running is still protected.
+This implements an explicit replacement policy, not a diagnosis that every
+rejected file is corrupt or that a missing path will be fixed by redownloading.
+
+Queue/history preflight resolves the full download scope, including episodes not
+shown in the current queue. Grabbed history can resolve missing queue mappings;
+cross-subject history and unresolved identities still block. Queue reads include
+unknown items so a hidden sibling cannot evade group validation. State and group
+membership are rechecked before mutation. A partial pack searches only its missing
+episodes. An all-existing group performs cleanup without searches or retry charges.
+The guard suppresses searches already issued during that queue scan or covered by
+another active download, and rechecks replacements after queue removal.
+
+The initial September 9 implementation used the following retention policy,
+superseded by the September 11 client-cleanup correction below. When current
+media or prior import history existed, the queue DELETE used
+`removeFromClient=false`, `blocklist=true`, and `skipRedownload=true`. Imported
+library files are retained, and the guard does not ask the download client to
+delete source files that may still be useful or shared. Those files may remain
+in the client for operator cleanup. A missing-only download with no prior imports
+retains the existing client-removal policy. This queue path never deletes a
+managed episode/movie file. Presence of such a file does not validate its subtitles.
+
+That initial operation journal recorded `preserveDownloadFiles`, the full episode scope,
+and the actual search scope when requested. Retry reservations cover only missing
+search targets, with existing caps and uncertain-operation exclusion retained.
+A failed queue removal, later read, or search is not replayed after restart.
+The existing recovery opt-in also runs after each successfully listed library in
+scan-once mode. Serve keeps startup/hourly checks. No environment defaults changed;
+startup logs now include whether queue recovery is enabled.
+
+The [Sonarr queue controller](https://github.com/Sonarr/Sonarr/blob/develop/src/Sonarr.Api.V3/Queue/QueueController.cs)
+and [Radarr queue controller](https://github.com/Radarr/Radarr/blob/develop/src/Radarr.Api.V3/Queue/QueueController.cs)
+provide independent client-removal and blocklist flags. Their failure services
+need grabbed history to publish the failure/blocklist event; without it, a queue
+request can otherwise return without blocklisting. Recovery therefore defers
+missing grabbed history rather than deleting a download and claiming success.
+The [Sonarr failure service](https://github.com/Sonarr/Sonarr/blob/develop/src/NzbDrone.Core/Download/FailedDownloadService.cs)
+and [download history service](https://github.com/Sonarr/Sonarr/blob/develop/src/NzbDrone.Core/Download/History/DownloadHistoryService.cs)
+document this event and its retained download state.
+
+Local fixtures cover all six message families, partial and all-existing targets,
+history-only/unparsed mappings, imported siblings, active and ambiguous shared
+downloads, stale snapshots, concurrent duplicate recovery, duplicate releases,
+active alternative downloads, replacements arriving during removal, retry caps,
+journal failures, missing-history recovery, cancellation, and ambiguous outcomes
+across restart. Both scan and serve opt-ins are tested. The final `go test ./...`
+pass completed in 16.122 seconds and `go test -race ./...` in 17.527 seconds.
+`go vet ./...` and `./lint.ps1` passed; lint reported zero issues. Linux/amd64
+application and test compilation also passed. Linux runtime and Docker execution
+were not exercised.
+
+The completed September 9 GET-only dry run inspected 192 Sonarr queue rows:
+47 eligible rows represented 29 downloads. It planned recovery for 24 downloads,
+including six partial groups and eight all-existing groups, with 13 scoped search
+plans. Five downloads remained blocked because grabbed history was absent.
+Radarr had 11 queue rows; one qualified and planned a movie search. The pass used
+227 Sonarr and 14 Radarr GETs in 2.65 seconds. The two duplicate four-episode packs
+with two missing episodes produced only one planned search for those missing
+targets. A separate check of the exact reported title resolved both downloads,
+confirmed episodes 05–06 already imported and 07–08 missing, and verified one
+shared replacement-search plan for 07–08 while retaining files. That check used
+19 GETs in 0.61 seconds. These are plans, not claims of completed production
+remediation.
+
+All requests used forced dry run, independent GET-only transports, and disabled
+redirects. There were **zero API mutations, retry-state writes, or media writes**.
+The harness uses empty in-memory retry state and cannot establish eligibility
+against the running deployment's counters or journal. It does not access download
+contents or validate existing subtitles; existing-file protection uses current
+Arr metadata. No new full-library probe pass or deployment was performed.
+
+## Download-client cleanup correction — September 11
+
+At the user's request, every queue removal now uses `removeFromClient=true`,
+including partial imports, all-existing groups, and downloads with prior import
+history. This asks Arr to remove the client task and delete its downloaded files.
+The previous client-file retention exception and its optional API flag are gone.
+Imported library files remain untouched by queue recovery. Full target validation,
+active-import protection, blocklisting, `skipRedownload=true`, missing-only search
+scope, retry caps, and uncertain-operation protection are unchanged. There are no
+new environment variables or default changes. The operation journal retains full
+episode and actual search scopes; new operations no longer record a file-retention
+choice. This change does not perform retroactive cleanup of old client tasks.
+
+Every local queue DELETE fixture now requires client removal. Regression tests
+cover partial packs, all-existing groups, and prior imports whose media is present
+or subsequently missing, for both Arr types. Dry runs still make no mutations or
+state writes. Existing restart, cancellation, duplicate-delivery, and concurrency
+tests pass. `go test ./...` passed in 16.307 seconds; `go test -race ./...` passed in
+17.683 seconds. Vet and lint passed with zero lint issues. Linux/amd64 application
+and test compilation passed; Linux runtime and download-client integration were
+not exercised.
+
+The fresh live queue dry run completed in 3.76 seconds with forced dry run,
+independent GET-only transports, and redirects disabled:
+
+| Instance | Queue rows | Candidate downloads | Recovery plans | Partial groups | All-existing groups | Search plans | GETs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Sonarr | 153 | 48 | 43 | 7 | 19 | 21 | 398 |
+| Radarr | 6 | 2 | 2 | 0 | 0 | 2 | 27 |
+
+All 45 plans explicitly requested client removal. Five Sonarr downloads remained
+protected because grabbed history was absent; there were no other preflight
+failure categories. The 425 requests made **zero API mutations, retry-state writes,
+or media writes**. These checks validate current metadata and planned behavior
+using empty retry state, not actual download-client deletion or deployed journal
+eligibility. Download contents were not inspected. No deployment was performed.
+
+Follow-up review identified an unresolved shared-download limitation. Both queue
+recovery and imported-file origin removal inspect only the current Arr instance.
+They do not check whether another Sonarr/Radarr instance needs the same client
+task. Queue deletion removes the entire client download, so another consumer
+could lose files it still needs. Sonarr's episode queue rows also inherit one
+download-level state and message list, rather than independent file readiness.
+Current rechecks and same-instance regression tests do not provide cross-instance
+coordination or an atomic lock against Arr imports. The shared-group regression
+subset passed after this review; no additional behavior change was made.
 
 ## Initial audit verification
 

@@ -31,6 +31,8 @@ launch/lint scripts and Docker deployment files. No generated API client is used
 - `probe_diagnostics.go`: exact recoverable-video diagnostic classification and
   bounded diagnostic logging; unknown/subtitle/container failures remain protected.
 - `service.go`: webhooks, library/unmatched scans, queue recovery, remediation.
+- `queue_recovery.go`: rejected/partial download preflights and missing-target
+  searches; remove client tasks and downloaded files while retaining library media.
 - `state.go`: retry state and atomic JSON persistence.
 - `safety.go`: identity, history/redownload, and filesystem preflight checks.
 - `jobs.go`: durable webhook admission, deferred retries, and review pauses.
@@ -122,8 +124,11 @@ saves jobs. Scans return an error for unresolved work and do not become daemons.
 
 Keep series-wide exclusion for uncertain operations: automatic Arr failure/search
 effects can extend beyond a file's episode mapping. Never classify a mutation's
-underlying network error as permission to replay it. Preserve queue pre-removal
-checks for existing media in shared downloads. Actual guard search targets are
+underlying network error as permission to replay it. Queue recovery may retire a
+rejected partial download while retaining managed library media. Always request
+client task and downloaded-file removal with `removeFromClient=true`. Resolve
+all targets from current queue/history, refuse active or ambiguous shared items,
+and search only missing targets. Actual guard search targets are
 journaled in `searchEpisodeIds`; already-replaced targets do not block the missing
 subset. A present replacement still needs its own subtitle validation.
 
@@ -150,3 +155,40 @@ sample valid probes, webhooks, stale-snapshot refusal, and queue reads on both
 servers. These tests made zero API mutations, retry-state writes, or media changes.
 This was targeted probe verification, not another full-library probe pass;
 AUDIT.md records the results and the remaining Linux/runtime verification limits.
+
+Partial/waiting-import recovery recognizes the six requested rejection families
+in completed importPending rows, retains active-import checks, and does not change
+DRY_RUN or RECOVER_BLOCKED_QUEUE defaults. Recovery also runs after each listed
+library in an opted-in one-time subtitle scan. Current queue and grabbed/import
+history resolve full targets; grabbed history is required because Arr otherwise
+cannot reliably blocklist. Remove client tasks and downloaded files even when
+current media or prior imports exist. Do not search or charge retries for
+all-existing targets. Suppress searches covered by active downloads or already
+requested in that queue scan.
+
+This follow-up passed native tests, race detection, vet, lint (zero issues), and
+Linux/amd64 application/test compilation. The live queue pass used 241 GETs:
+24 Sonarr download plans (six partial, eight all-existing, 13 search plans) and
+one Radarr plan. Five Sonarr downloads lacked grabbed history and stayed protected.
+The exact reported duplicate packs passed a separate 19-GET dry run: preserve
+episodes 05–06 and search 07–08 once. All live checks made zero API mutations,
+retry-state writes, or media changes. They use empty retry state; deployment
+counter/journal eligibility and actual server mutations remain unverified.
+
+The September 11 correction removes the partial-import client-file retention
+exception at the user's request. All queue removals request `removeFromClient=true`
+alongside blocklisting and suppressed Arr redownload; imported library files remain
+untouched and searches still target only missing media. Native tests, race detection,
+vet, lint (zero issues), and Linux/amd64 application/test compilation passed.
+The fresh live GET/dry-run pass used 425 GETs: 43 Sonarr plans (seven partial,
+19 all-existing, 21 search plans) and two Radarr search plans. Five Sonarr downloads
+still lacked grabbed history. No API mutations, retry-state writes, or media writes
+occurred. Local HTTP fixtures verify removal flags, including prior imports with
+present or missing media; actual client deletion and deployment remain untested.
+
+Known shared-download limit: preflights inspect only the current Arr instance.
+They do not coordinate another Sonarr/Radarr instance using the same client task.
+A queue removal affects the entire client download and can interrupt another
+consumer. Sonarr's episode queue rows inherit download-level state and diagnostics;
+do not describe them as independent per-file readiness checks. Same-instance group
+tests do not establish protection across instances or atomicity with Arr imports.
