@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,8 +11,114 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Prushka/arr-guard/internal/arr"
 	"github.com/Prushka/arr-guard/internal/probe"
 )
+
+func TestUnidentifiedSubtitlesArePolicyFailures(t *testing.T) {
+	for _, test := range []struct{ name, output, diagnostic string }{
+		{"NoStreams", `{"streams":[]}`, "[error] Could not find codec parameters"},
+		{"UnknownStream", `{"streams":[{"codec_type":"unknown","codec_name":"unknown","tags":{"language":"eng","title":"English"}}]}`, "[unknown @ 0x123] [error] Cannot identify stream"},
+		{"MissingStreamType", `{"streams":[{"codec_name":"subrip","tags":{"language":"eng"}}]}`, "[subrip @ 0x123] [error] Invalid subtitle data"},
+		{"ContainerDiscovery", `{"streams":[{"codec_type":"video","codec_name":"h264"}],"format":{"format_name":"matroska,webm"}}`, "[matroska,webm @ 0x123] [error] File ended prematurely"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newSafetyFixture(t, "radarr")
+			p := fixtureDiagnosticProber(t, test.output, test.diagnostic, 0)
+			v, err := p.Validate(t.Context(), f.file.Path)
+			if err != nil {
+				t.Fatal("completed probe with no identifiable subtitles must reach policy", err)
+			}
+			if v.Valid || v.HasSubtitles || v.HasEnglish || v.HasUnknownLanguage || len(v.ProbeWarnings) != 0 {
+				t.Fatalf("unidentified stream was accepted or diagnostic was ignored: %+v", v)
+			}
+			if !strings.Contains(v.Reason, "no identifiable embedded or sidecar subtitle; ffprobe diagnostics:") || strings.Contains(v.Reason, "0x123") {
+				t.Fatalf("missing rejection diagnostics: %s", v.Reason)
+			}
+			if applyOldMediaGrace(v, time.Now().Year()-20, time.Now()).Valid {
+				t.Fatal("age grace turned an unidentified stream into a subtitle")
+			}
+			// New subtitles appearing after the probe must still stop deletion.
+			if err := os.WriteFile(filepath.Join(filepath.Dir(f.file.Path), "fixture.en.srt"), []byte("new subtitle"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.service.applyValidation(t.Context(), f.client, f.file, v, f.file.Path); err == nil || len(f.mutations) != 0 {
+				t.Fatal("unidentified-stream rejection bypassed snapshot validation")
+			}
+		})
+	}
+}
+
+func TestUnidentifiedSubtitlesRecoverThroughScanAndWebhook(t *testing.T) {
+	for _, kind := range []string{"sonarr", "radarr"} {
+		for _, mode := range []string{"scan", "webhook"} {
+			for _, dry := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/dry=%t", kind, mode, dry), func(t *testing.T) {
+					f := newSafetyFixture(t, kind)
+					f.service.config.DryRun = dry
+					f.history = []arr.HistoryRecord{
+						{ID: 1, MovieID: 3, SeriesID: 3, EpisodeID: 10, DownloadID: "pack", EventType: "grabbed", SourceTitle: "fixture"},
+						{ID: 2, MovieID: 3, SeriesID: 3, EpisodeID: 10, DownloadID: "pack", EventType: "downloadFolderImported", Data: map[string]string{"fileId": "17"}},
+					}
+					p := fixtureDiagnosticProber(t, `{"streams":[{"codec_type":"unknown"}]}`, "[error] Could not identify stream", 0)
+					f.service.probeFn = p.Validate
+					var err error
+					if mode == "scan" {
+						err = f.service.Audit(t.Context())
+					} else {
+						payload := arr.WebhookPayload{EventType: "Download", DownloadID: "pack", EpisodeFile: &arr.WebhookFile{ID: 17}, MovieFile: &arr.WebhookFile{ID: 17}}
+						err = f.service.processWebhook(t.Context(), f.client, payload)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					if dry {
+						if len(f.mutations)+len(f.service.state.state.Attempts)+len(f.service.state.Pending()) != 0 {
+							t.Fatal("dry run mutated")
+						}
+						if _, err := os.Stat(f.service.state.path); !errors.Is(err, os.ErrNotExist) {
+							t.Fatal("dry run persisted state")
+						}
+					} else {
+						resource := "moviefile"
+						if kind == "sonarr" {
+							resource = "episodefile"
+						}
+						if !slices.Equal(f.mutations, []string{"DELETE /api/v3/" + resource + "/17", "POST /api/v3/history/failed/1", "POST /api/v3/command"}) || len(f.commands) != 1 {
+							t.Fatalf("wrong remediation: %v", f.mutations)
+						}
+						if kind == "sonarr" && !slices.Equal(f.commands[0].EpisodeIDs, []int{10, 12}) {
+							t.Fatal("episode scope changed")
+						}
+						if kind == "radarr" && !slices.Equal(f.commands[0].MovieIDs, []int{3}) {
+							t.Fatal("movie scope changed")
+						}
+						if len(f.service.state.Pending()) != 0 {
+							t.Fatal("completed remediation left a journal")
+						}
+					}
+					if content, err := os.ReadFile(f.file.Path); err != nil || string(content) != "fixture media" {
+						t.Fatal("guard changed fixture media")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestOperationalFailureIsNotMissingSubtitles(t *testing.T) {
+	for _, diagnostic := range []string{"[error] Input/output error", "[error] Permission denied", "[h264 @ 0x123] [fatal] Cannot allocate memory", "[error] No such file or directory"} {
+		f := newSafetyFixture(t, "radarr")
+		p := fixtureDiagnosticProber(t, `{"streams":[{"codec_type":"video","codec_name":"h264"}]}`, diagnostic, 0)
+		f.service.probeFn = p.Validate
+		if err := f.service.auditFile(t.Context(), f.client, f.file); err == nil {
+			t.Fatal("operational failure became a subtitle rejection")
+		}
+		if len(f.mutations)+len(f.service.state.state.Attempts)+len(f.service.state.Pending()) != 0 {
+			t.Fatal("operational failure mutated Arr or state")
+		}
+	}
+}
 
 const recoveredVideoJSON = `{"codec_type":"video","codec_name":"mpeg2video","width":1440,"height":1080}`
 

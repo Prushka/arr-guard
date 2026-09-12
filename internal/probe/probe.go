@@ -71,10 +71,7 @@ func (p Prober) Validate(ctx context.Context, filePath string) (Validation, erro
 	if result.Streams == nil {
 		return Validation{}, withProbeDiagnostics(errors.New("ffprobe output is missing the streams array"), stderr.String())
 	}
-	warnings, err := classifyProbeDiagnostics(stderr.String(), result)
-	if err != nil {
-		return Validation{}, err
-	}
+	warnings, diagnosticErr := classifyProbeDiagnostics(stderr.String(), result)
 
 	summary := newSubtitleSummary()
 	for _, stream := range result.Streams {
@@ -94,12 +91,21 @@ func (p Prober) Validate(ctx context.Context, filePath string) (Validation, erro
 	for _, subtitle := range external {
 		summary.add(subtitle.Language)
 	}
+	validation := summary.validation()
+	if diagnosticErr != nil {
+		if validation.HasSubtitles || hasOperationalProbeDiagnostic(stderr.String()) {
+			return Validation{}, diagnosticErr
+		}
+		// A completed probe with no identifiable subtitles fails subtitle policy,
+		// even if discovery reported media errors. Preserve those diagnostics as
+		// the rejection reason, not as ignored audio/video warnings.
+		validation.Reason = withProbeDiagnostics(errors.New("no identifiable embedded or sidecar subtitle"), stderr.String()).Error()
+	}
 
 	after, err := os.Stat(filePath)
 	if err != nil || !pathutil.SameFile(before, after) {
 		return Validation{}, errors.New("media changed during probe")
 	}
-	validation := summary.validation()
 	validation.ProbeWarnings = warnings
 	validation.FileInfo = after
 	validation.DirectoryInfo = directory

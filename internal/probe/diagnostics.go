@@ -25,6 +25,9 @@ func classifyProbeDiagnostics(raw string, result ProbeResult) ([]string, error) 
 	failure := func() ([]string, error) {
 		return nil, withProbeDiagnostics(errors.New("ffprobe reported media errors; subtitle discovery is not trustworthy"), raw)
 	}
+	if hasOperationalProbeDiagnostic(raw) {
+		return failure()
+	}
 	// Match decoder names to ffprobe's own stream types. All streams with a
 	// matching name must be audio/video; an unknown or subtitle type wins.
 	decoders := map[string]bool{}
@@ -70,6 +73,23 @@ func subtitleRelatedDiagnostic(message string) bool {
 	// cannot establish that these messages are unrelated to subtitle discovery.
 	for _, marker := range []string{"subtitle", "caption", "a53", "a/53", "cea-608", "cea-708", "eia-608", "eia-708", "cc_data", "cc_count", "cc_type", "teletext", "user data", "user_data"} {
 		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// These describe failures to access or process the input, not a media policy
+// rejection. Preserve them even if ffprobe exits zero with a partial inventory.
+func hasOperationalProbeDiagnostic(raw string) bool {
+	raw = strings.ToLower(raw)
+	for _, marker := range []string{
+		"input/output error", "i/o error", "permission denied", "access is denied",
+		"no such file or directory", "cannot allocate memory", "out of memory",
+		"too many open files", "resource temporarily unavailable", "operation not permitted",
+		"connection timed out", "network is unreachable", "connection reset by peer", "stale file handle",
+	} {
+		if strings.Contains(raw, marker) {
 			return true
 		}
 	}

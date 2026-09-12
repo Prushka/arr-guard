@@ -180,9 +180,15 @@ also requires `DRY_RUN=false`.
    they do not establish subtitle absence. The exact `Chapter end time ... before
    start ...` error from the reported container is also unrelated to subtitles.
    These diagnostics are logged as ignored warnings; normal subtitle policy applies.
-   Subtitle/caption errors (including caption data parsed by video decoders),
-   ambiguous or unknown diagnostic contexts, and other container/discovery errors
-   still stop validation. Nonzero exit status, malformed output, cancellation,
+   If ffprobe completes with a stream array but identifies no subtitle stream and
+   no matching sidecar exists, discovery/media diagnostics become a normal failed
+   subtitle validation. An untyped/unknown stream is not a subtitle, even if its
+   codec name or tags mention English. The failure retains the actual diagnostic
+   and can proceed through normal remediation in both scans and webhooks.
+   When subtitles are identified, subtitle/caption errors, ambiguous contexts, and
+   other container/discovery errors still stop validation. Operational diagnostics
+   such as I/O, access, and memory errors always stop validation, even on exit zero.
+   Nonzero exit status, malformed output, cancellation,
    timeouts, and output limits also stop validation. Both ignored and blocking
    diagnostics retain their actual text, with duplicates removed and long output
    truncated for logging; the full bounded stderr is checked first. This is subtitle

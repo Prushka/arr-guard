@@ -495,6 +495,39 @@ changes. This was targeted verification, not a full-library probe pass; actual
 server mutations, Linux runtime, and deployment were not exercised. Logs are in
 ignored `logs/subtitle-diagnostics-*.log`.
 
+## Unidentified subtitle inventory follow-up — September 12
+
+At the user's request, an exit-zero probe with a complete JSON stream array and
+no identifiable subtitle streams or matching sidecars now fails subtitle policy,
+even when media/stream-discovery diagnostics are present. The diagnostic text is
+retained in the rejection reason. These failures can complete normal scan/webhook
+remediation through the existing origin, snapshot, state, and search checks instead
+of remaining probe-error retries. Unknown stream types and subtitle-looking codec
+names or English tags do not establish a subtitle or qualify for age grace.
+
+Operational diagnostics such as I/O, permissions, and memory failures still return
+errors, including when ffprobe exits zero. Nonzero exit status, incomplete/invalid
+JSON, output limits, access failures, and snapshot changes stay protected. When a
+subtitle stream or sidecar is identified, the preceding diagnostic rules still
+apply; this change does not convert an identified PGS decoding error into a policy
+rejection.
+
+Native tests, race detection, vet, lint (zero issues), and Linux/amd64 application
+and test compilation passed. Local fixtures cover unidentified/empty inventories,
+misleading English metadata, media-discovery errors, operational failures, and
+new sidecars appearing before remediation. Both Arr fixtures exercise the full
+scan and webhook paths, including deletion, confirmed-history blocklisting, scoped
+searches, and dry-run state preservation.
+
+The live three-file check made 18 GETs: both reported chapter/JPEG examples still
+pass with English subtitles through repeated probes and scan/webhook dry runs;
+the known PGS bitmap failure remains protected. This checks compatibility of the
+existing cases. The new unidentified-subtitle branch and mutation sequence were
+verified with local fixtures, not by modifying production media. All live checks
+forced dry run, used an independent GET-only transport with redirects disabled,
+and made zero API mutations, retry-state writes, or media changes. Logs are in
+ignored `logs/unidentified-subtitles-*.log`; no deployment was performed.
+
 ## Initial audit verification
 
 Final native unit/integration tests, the Go race detector, `go vet`, and pinned

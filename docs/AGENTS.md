@@ -19,9 +19,9 @@ ignored `bin/`. Do not move or print `.env` or commit private runtime artifacts.
 - Test mutation workflows against local `httptest` servers and temporary fixtures.
   Do not run `serve.ps1`, Docker Compose, or a normal application invocation against
   `.env` while auditing: they may enable destructive behavior.
-- Arr owns all media mutations. The sidecar only reads local media. Failed probes,
-  ambiguous identities, invalid configuration, and state persistence failures must
-  stop remediation. Do not treat a disappeared queue item as proof of blocklisting.
+- Arr owns all media mutations. The sidecar only reads local media. Operational
+  probe failures, ambiguous identities, invalid configuration, and state persistence
+  failures must stop remediation. Do not treat a disappeared queue item as proof of blocklisting.
 - Resolve the complete authoritative episode mapping before remediation. Guard
   searches target only its still-missing episodes or a confirmed movie ID. Never
   issue a whole-series search.
@@ -35,7 +35,8 @@ ignored `bin/`. Do not move or print `.env` or commit private runtime artifacts.
 - `internal/arr`: v3 HTTP client, resource models, queue status classification,
   and automatic-redownload policy reads. HTTP details stay inside this package.
 - `internal/probe`: ffprobe, matching sidecars, snapshot validation, and bounded
-  diagnostics; unknown/subtitle/stream-discovery failures remain protected.
+  diagnostics; completed discovery with no identifiable subtitles fails policy,
+  while operational failures and errors with identified subtitles remain protected.
 - `internal/pathutil`: path normalization, containment, mapping, file identity,
   and supported media/subtitle extensions; no filesystem mutations.
 - `internal/guard`: orchestration and its durable state. `run.go` handles startup
@@ -99,7 +100,12 @@ passes; completion does not mean every probe or remediation preflight succeeded.
   dimensions. Explicit subtitle/caption/user-data errors remain protected even
   inside a video decoder. A context also matching the reported container is
   ambiguous; allow only its exact chapter end-before-start timestamp diagnostic.
-  Keep other container, unknown/unclassified, and subtitle failures protected.
+  If a completed probe has no identifiable subtitle streams or matching sidecars,
+  other media/discovery diagnostics become a normal failed subtitle validation,
+  retaining diagnostics in its rejection reason. Unknown/untyped streams do not
+  qualify as subtitles or for unknown-language age grace. With identified subtitles,
+  keep other container, unknown/unclassified, and subtitle failures protected.
+  Operational diagnostics (I/O, permissions, memory, etc.) always stop validation.
   Keep complete JSON, output bounds, exit status, and snapshots enforced. Classify
   full stderr before deduplicating, sanitizing, and bounding warning/error logs.
   Never infer a subtitle language from the codec name. Disable FFREPORT and forced
@@ -246,3 +252,13 @@ files now pass. The final 14-file GET/dry-run set accepted 13 files through both
 scan/webhook checks and retained one actual PGS subtitle bitmap failure; five
 historical IDs were unavailable. No live API mutations, state writes, or media
 changes occurred. See AUDIT.md for counts, failed reads, and verification limits.
+
+The no-identifiable-subtitles correction makes a completed probe with media/discovery
+diagnostics a policy rejection when no subtitle stream or matching sidecar exists.
+Its reason retains diagnostics; it does not mark those errors as ignored warnings.
+Local tests verify full scan/webhook deletion, blocklisting, scoped search, dry-run
+state preservation, age-grace exclusion, and stale-sidecar refusal. Operational I/O,
+access, and memory diagnostics remain errors even with exit-zero output. Native
+tests, race detection, vet, lint, and Linux compilation passed. Live GET-only checks
+confirmed the existing English accepts and identified PGS failure remain unchanged;
+the new unidentified-stream remediation branch was exercised with local fixtures.

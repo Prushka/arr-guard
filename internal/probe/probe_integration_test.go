@@ -201,7 +201,7 @@ func TestProbeFailuresNeverBecomeSubtitleRejections(t *testing.T) {
 		{name: "malformed", output: "invalid-json"},
 		{name: "null", output: "null"},
 		{name: "missingStreams", output: "{}"},
-		{name: "mediaErrorDespiteSuccess", output: `{"streams":[]}`, diagnostic: "fixture corrupt media"},
+		{name: "readErrorDespiteSuccess", output: `{"streams":[]}`, diagnostic: "[error] Input/output error"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
