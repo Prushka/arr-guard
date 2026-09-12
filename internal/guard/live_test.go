@@ -37,9 +37,9 @@ type liveReadTransport struct {
 func (rt *liveReadTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	prefix := strings.TrimRight(rt.base.Path, "/") + "/api/v3/"
 	rel := strings.TrimPrefix(r.URL.Path, prefix)
-	allowed := map[string]bool{"system/status": true, "config/downloadclient": true, "series": true, "movie": true, "episode": true, "episodefile": true, "moviefile": true, "queue": true, "history": true, "history/movie": true, "history/series": true}
+	allowed := map[string]bool{"system/status": true, "config/downloadclient": true, "series": true, "movie": true, "episode": true, "episodefile": true, "moviefile": true, "queue": true, "history": true, "history/movie": true, "history/series": true, "manualimport": true, "parse": true}
 	resource, suffix, _ := strings.Cut(rel, "/")
-	if resource == "movie" || resource == "episodefile" || resource == "moviefile" {
+	if resource == "movie" || resource == "episodefile" || resource == "moviefile" || resource == "command" {
 		if id, err := strconv.Atoi(suffix); err == nil && id > 0 {
 			allowed[rel] = true
 		}

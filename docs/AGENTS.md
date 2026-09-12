@@ -27,6 +27,25 @@ ignored `bin/`. Do not move or print `.env` or commit private runtime artifacts.
   issue a whole-series search.
   Arr-owned automatic recovery retains Arr's release/season search scope.
 - Keep dry run free of API mutations and retry-state writes, including cleanup.
+- Exhausted matched-by-ID waiting imports use a separate, per-file manual-import
+  preflight. Resolve filenames independently through Arr's parse API or a unique
+  normalized catalog title/alias match (and movie year), require
+  exact episode mappings and passing source subtitle validation, and never replace
+  existing library files. Persist command submission before POST; reconcile its
+  command/history/library outcome with reads, never replay an uncertain import.
+  All other waiting-import reasons retain their existing retry-limit behavior.
+- Check exact episode IDs against independently parsed or native/scene/absolute
+  numbering; never use grab history alone to approve a file's identity. Require
+  all selected missing targets to be exhausted and uniquely covered. The import
+  path checks other configured Arr instances for shared tasks/output paths, but
+  ordinary queue removal retains its documented cross-instance limitation.
+  Complete an import only from new matching history and validated current library
+  files. Missing command acknowledgements can be reconciled this way, never replayed.
+  Mount/map completed downloads for source probes; do not mutate live mappings.
+- After verified partial manual imports, remove a residual rejected queue task
+  only with all pack targets present, unchanged output/ownership, and no other
+  configured consumer. Journal cleanup before DELETE; request client task/files
+  removal, no blocklist and no redownload. Never replay an uncertain cleanup.
 
 ## Code map
 
@@ -42,7 +61,8 @@ ignored `bin/`. Do not move or print `.env` or commit private runtime artifacts.
 - `internal/guard`: orchestration and its durable state. `run.go` handles startup
   and shutdown; `http.go` serves webhooks; `scan.go` handles library/unmatched scans;
   `remediation.go`, `safety.go`, and `queue_recovery.go` own remediation preflights
-  and scoped searches. `state.go`, `state_model.go`, `jobs.go`, `retry.go`, and
+  and scoped searches; `manual_import*.go` owns final import identity, validation,
+  command reconciliation and residual cleanup. `state.go`, `state_model.go`, `jobs.go`, `retry.go`, and
   platform-specific `lock_*.go` keep journal, retry, and writer-lock rules together.
 - `internal/testutil`: shared test environment setup and repository discovery.
 - `*_test.go`: tests live beside their owning package; workflow/live integration
@@ -208,12 +228,14 @@ still lacked grabbed history. No API mutations, retry-state writes, or media wri
 occurred. Local HTTP fixtures verify removal flags, including prior imports with
 present or missing media; actual client deletion and deployment remain untested.
 
-Known shared-download limit: preflights inspect only the current Arr instance.
+Known ordinary queue-removal limit: preflights inspect only the current Arr instance.
 They do not coordinate another Sonarr/Radarr instance using the same client task.
 A queue removal affects the entire client download and can interrupt another
 consumer. Sonarr's episode queue rows inherit download-level state and diagnostics;
 do not describe them as independent per-file readiness checks. Same-instance group
 tests do not establish protection across instances or atomicity with Arr imports.
+The final matched-by-ID import and its residual cleanup additionally check other
+configured instances, as described above; unconfigured consumers remain unknown.
 
 Package organization follow-up: runtime code now lives in `cmd/arr-guard` and the
 internal packages listed above. State schema, defaults, remediation ordering, and
@@ -262,3 +284,14 @@ access, and memory diagnostics remain errors even with exit-zero output. Native
 tests, race detection, vet, lint, and Linux compilation passed. Live GET-only checks
 confirmed the existing English accepts and identified PGS failure remain unchanged;
 the new unidentified-stream remediation branch was exercised with local fixtures.
+
+Final matched-by-ID import recovery passed native tests, race detection, vet,
+lint (zero issues), and Linux/amd64 application/test compilation. All media import
+and cleanup operations use Arr APIs; local filesystem writes in these workflow
+tests only simulate Arr with disposable fixtures. Live exhausted-budget previews
+checked nine downloads using 126 GETs: four title-identity refusals, one episode
+mapping refusal, and four subtitle-policy refusals. Temporary download mappings
+were applied only in test memory. Existing queue and probe regression checks used
+114 GETs. No production API mutations, state/configuration writes, or media changes
+occurred; positive import/cleanup behavior was tested only locally. AUDIT.md records
+the outcome and limits.

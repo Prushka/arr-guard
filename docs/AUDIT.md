@@ -6,6 +6,88 @@ write, deletion, move, or rename is used for verification. `.env` is read privat
 by an opt-in test harness; it is not changed. Mutation scenarios use local HTTP
 fixtures and temporary test media.
 
+## Exhausted matched-by-ID import follow-up — September 12
+
+Completed waiting-import downloads can now use Arr's manual-import workflow after
+every selected missing movie/episode has exhausted `MAX_ATTEMPTS`. Only the movie
+or series "Found matching ... via grab history, but release was matched ... by ID"
+reason qualifies, with no additional rejection. The existing
+`RECOVER_BLOCKED_QUEUE` gate applies in scan and serve; no application environment
+variables or defaults were added or changed.
+
+Guard discovers files with `GET /api/v3/manualimport` and submits selected files
+through `POST /api/v3/command` with `name: "ManualImport"` and `importMode: "auto"`.
+It never copies, moves, edits, or deletes media through the filesystem. Arr owns
+import and normal download cleanup. `POST /manualimport` reprocesses selection
+metadata; it is not the command used to perform the import. These distinctions
+were checked against upstream
+[Sonarr ManualImportService](https://github.com/Sonarr/Sonarr/blob/develop/src/NzbDrone.Core/MediaFiles/EpisodeImport/Manual/ManualImportService.cs)
+and [Radarr ManualImportService](https://github.com/Radarr/Radarr/blob/develop/src/NzbDrone.Core/MediaFiles/MovieImport/Manual/ManualImportService.cs).
+
+Each selected filename must independently identify the intended movie or exact
+episodes through Arr's parse API or a unique normalized catalog title/alias match.
+Fallback movie matching requires the year. Episode numbers must resolve uniquely
+using native/scene seasonal or absolute numbering; grab history alone does not
+establish content identity. Selected files must pass the existing subtitle policy,
+cover all missing targets exactly once, preserve Arr's quality/language metadata,
+and remain within the download source tree, outside the library. Existing files
+are not selected for replacement. Fresh decisions, queue/history ownership,
+target absence, source identity, and subtitle snapshots are required after probes.
+Other configured Arr queues are checked for shared client tasks/output paths.
+
+Submission is journaled before the API write without charging or resetting retry
+counters. Pending imports are reconciled at startup, on subsequent queue scans,
+and every ten seconds in serve. New matching import history, correct current
+library assignments, and passing library probes establish success; an accepted or
+missing command alone does not. Lost acknowledgements may be resolved from those
+reads, but an uncertain import is never submitted again automatically.
+
+A partial import may leave a rejected queue task because Arr counts only files
+imported by the current command. Once the selected files are verified and every
+pack target has a managed file, Guard can remove that residual task through Arr's
+queue API. It rechecks ownership, output path, target presence, and other configured
+consumers, then journals cleanup before `DELETE`. Flags request client task and
+downloaded-file removal, with no blocklist or redownload. An uncertain cleanup is
+never replayed. Dry-run, read-only client, and unmatched mode prevent these writes;
+turning off queue recovery prevents new residual cleanup.
+
+Final `go test ./...`, `go test -race ./...`, `go vet ./...`, and `./lint.ps1` passed;
+lint reported zero issues. Linux/amd64 application and guard-test binaries
+cross-compiled; they were not executed on Linux. Local HTTP fixtures exercise
+successful movie/episode imports, partial packs, exact request metadata and cleanup
+flags, shared consumers, mixed budgets, duplicate/concurrent delivery, stale
+files/sidecars/queue decisions, identity conflicts, persistence failures, lost
+acknowledgements, failed/late commands, restart, and read-only state preservation.
+All media writes and removals in those fixtures are disposable simulations of Arr.
+
+Live verification used independent GET-only, exact-origin transports with redirects
+disabled and forced dry run. The user-provided completed-download roots were added
+only to the test's in-memory mappings. Exhausted retry counts were also simulated
+in memory; deployment counters and configuration were not changed.
+
+| Live check | Result | GETs |
+| --- | --- | ---: |
+| Final-import preview | Nine downloads: eight Sonarr, one Radarr; none approved | 126 |
+| Existing queue recovery below the cap | Nine Sonarr and one Radarr plan, no preflight refusals | 96 |
+| Existing probe/webhook regression | Two English-subtitle accepts; one identified PGS subtitle error remained protected | 18 |
+
+The nine final-import refusals were four unknown/ambiguous series titles, one
+unresolved/conflicting episode mapping, and four source subtitle-policy failures
+(three Sonarr, one Radarr). The reported Doraemon download reached source probing
+but still failed subtitle validation, so this policy does not force it into the
+library. The previews tested compatibility and decisions, not actual production
+import or cleanup. All live checks made zero API mutations, runtime-state writes,
+configuration changes, or media writes. Neither `.env` nor the deployment
+configuration directory was modified. Logs remain under ignored `logs/`.
+
+Remaining limits: unknown identities and invalid subtitles stay protected; an
+unconfigured Arr consumer cannot be coordinated. Arr offers no atomic transaction
+across preflight and command submission, so external-import races cannot be fully
+eliminated. Unverifiable command/cleanup outcomes remain journaled. This fallback
+does not change imported-file remediation or bound Arr's independent automatic
+replacement searches. Positive server mutation behavior was verified only with
+local fixtures; no deployment was performed.
+
 ## Findings and fixes
 
 | Area | Risk found | Implemented behavior |

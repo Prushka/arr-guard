@@ -55,6 +55,9 @@ func LoadStateStore(path string) (*StateStore, error) {
 		if key == "" || (op.Kind != "sonarr" && op.Kind != "radarr") || op.SubjectID < 1 || op.Phase == "" {
 			return nil, errors.New("invalid operation journal")
 		}
+		if err := validateImportJournal(key, op); err != nil {
+			return nil, err
+		}
 	}
 	for key, job := range store.state.Webhooks {
 		if job.Failures < 0 {
@@ -189,6 +192,27 @@ func (s *StateStore) Complete(key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.updateLocked(func(next *State) { delete(next.Operations, key); next.Completed[key] = true })
+}
+
+func (s *StateStore) IsCompleted(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state.Completed[key]
+}
+
+func (s *StateStore) ImportSubmitted(key string, commandID int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	op, ok := s.state.Operations[key]
+	if !ok || op.Import == nil || commandID < 1 {
+		return errors.New("missing import journal or command ID")
+	}
+	return s.updateLocked(func(next *State) {
+		pending := *op.Import
+		pending.CommandID = commandID
+		op.Import, op.Phase = &pending, "manual-import-submitted"
+		next.Operations[key] = op
+	})
 }
 
 // Record who will search before history failure can itself enqueue an Arr search.

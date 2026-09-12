@@ -120,7 +120,7 @@ Completed `importBlocked` downloads remain eligible. Completed `importPending`
 - No files found are eligible for import.
 - Not a quality revision upgrade for an existing episode/movie.
 - Unable to parse file.
-- A quality "was unexpected considering the" grabbed release.
+- A quality, season, or episode "was unexpected considering the" release/folder.
 - Unable to determine if file is a sample.
 - Found matching movie via grab history, but release was matched to movie by ID.
 - Found matching series via grab history, but release was matched to series by ID.
@@ -134,11 +134,12 @@ still waiting without a recognized rejection stop recovery. It rechecks the grou
 before mutation. These reasons authorize replacement policy; they do not prove
 that a download is corrupt or distinguish an empty folder from a filesystem issue.
 
-Shared-download checks cover only the Arr instance being processed. They do not
+Queue-removal shared-download checks cover only the Arr instance being processed. They do not
 check whether another Sonarr/Radarr instance needs the same download-client task.
 Removing one queue entry removes the whole client download and can interrupt that
 other instance. Sonarr queue rows also share the download's status; they are not
-independent per-file readiness checks. Cross-instance coordination is not implemented.
+independent per-file readiness checks. The final-import fallback below separately
+checks both configured instances; ordinary queue removal retains this limitation.
 
 For a partial import, some episodes in a download pack have been imported while
 others are still missing. Recovery blocklists the failed release and searches
@@ -155,10 +156,69 @@ omit current replacements, other downloads already in progress, and targets
 already searched during the same queue scan. Replacements arriving after removal
 are rechecked too. `MAX_ATTEMPTS` applies only to the missing targets reserved for
 a guard search; already-present episodes cannot exhaust a partial pack's budget.
-Exhausted missing targets remain protected. A failed removal or search is never
+Exhausted missing targets remain protected, except for the matched-by-ID final
+import described below. A failed removal or search is never
 replayed after an uncertain result or restart. Dry run makes no API or retry-state
 writes. No configuration defaults changed for this feature; actual remediation
 also requires `DRY_RUN=false`.
+
+When every missing target reserved for a replacement search has exhausted
+`MAX_ATTEMPTS`, Guard can submit a final `ManualImport` for a completed download
+waiting to import **only** because it was matched to a movie/series by ID through
+grab history. This uses the existing `RECOVER_BLOCKED_QUEUE` setting in both scan
+and serve modes; no additional environment variable or default change is needed.
+It does not change the retry policy for imported-file subtitle failures or other
+waiting-import reasons.
+
+Guard discovers candidates with Arr's GET manual-import API and parses each
+filename independently of grab history. It requires the same movie identity or
+the same series and exact episodes. If Arr cannot resolve the title directly,
+Guard accepts only a unique catalog title/alias match; movie matches also require
+the parsed year. Comparison normalizes punctuation and, for movies, the words
+"the", "movie", and "film". There is no fuzzy or partial-title matching. Episode
+numbers must resolve uniquely against current native/scene season or absolute
+numbering. Ambiguous mappings, unknown aliases, obfuscated filenames with no
+independent identity, and conflicting season aliases stay protected.
+
+Selected files must cover all reserved missing targets without overlap, pass
+the existing subtitle policy, and have no other import rejection. Guard preserves
+Arr's quality, revision, and language metadata. Existing library files are never
+selected for replacement; a partial pack can import its missing episodes while
+retaining the others. Candidate decisions, queue ownership, target absence, source
+size, and media/sidecar snapshots are checked again before submission. Guard must
+be able to read completed downloads: mount them into its runtime and, where paths
+differ, include them in the existing `PATH_MAPPINGS_JSON` configuration. Library
+path mappings alone do not expose download folders. Mapped download roots also
+participate in unmatched scans; use `UNMATCHED_EXCLUDE_DIRS` if those scans should
+skip them.
+
+The fallback submits `POST /api/v3/command` with `name: "ManualImport"` and
+`importMode: "auto"`, using Arr's normal manual-import workflow. Guard never moves
+or copies media itself. The import has no blocklist,
+replacement search, or retry increment/reset. Arr owns file import and its normal
+completed-download cleanup. If a partial import leaves a rejected queue task,
+Guard removes it only after verifying the imported files and confirming all pack
+targets have managed files. This cleanup requests `removeFromClient=true`,
+`blocklist=false`, and `skipRedownload=true`: remove the client task and downloaded
+files while retaining library media. Before submission and residual cleanup, Guard checks
+the other configured Arr instance for shared download IDs or overlapping output
+paths. An unconfigured instance and races with external importers cannot be
+coordinated through these checks.
+
+Command submission is journaled before the network write. Completion requires new
+matching import history, correct current library file/episode assignments, and
+successful subtitle validation of those library files. Command acknowledgements
+alone do not establish success. Serve rechecks pending imports every ten seconds;
+startup and later queue scans also verify their outcome through reads. Any needed
+residual queue cleanup is a separate, journaled Arr API request after verification.
+A one-time
+scan reports unfinished work if an import is still running. A lost acknowledgement
+or expired command can be reconciled from verified history/files; an uncertain
+import is never resubmitted automatically. An uncertain residual queue removal is
+also never replayed. Unverifiable outcomes remain recorded
+for reconciliation. Normal successful library/webhook validation can subsequently
+reset retry counters under the existing snapshot rules. Dry run writes neither
+Arr resources nor state.
 
 ## Remediation behavior
 

@@ -144,6 +144,7 @@ type safetyFixture struct {
 	commands              []arr.CommandRequest
 	fail                  string
 	before                func(*http.Request)
+	handle                func(http.ResponseWriter, *http.Request) bool
 	autoRedownload        bool
 	interactiveRedownload bool
 	configResponse        any
@@ -184,6 +185,9 @@ func newSafetyFixture(t *testing.T, kind string) *safetyFixture {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if f.handle != nil && f.handle(w, r) {
+			return
+		}
 		respond := func(v any) {
 			if err := json.NewEncoder(w).Encode(v); err != nil {
 				t.Error(err)

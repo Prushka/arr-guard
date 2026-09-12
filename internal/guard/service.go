@@ -125,6 +125,7 @@ func (s *Service) StartWorkers(ctx context.Context) {
 		defer ticker.Stop()
 		for {
 			s.dispatchStoredJobs()
+			_ = s.reconcileManualImports(ctx, nil)
 			select {
 			case <-ctx.Done():
 				return
@@ -164,13 +165,14 @@ func (s *Service) StopWorkers() {
 	s.wg.Wait()
 }
 
-// CleanupPending reports unfinished operations without replaying mutations. Arr
-// does not provide idempotency keys; even an HTTP error may follow a committed
-// mutation. The durable journal requires operator reconciliation in this case.
-func (s *Service) CleanupPending(_ context.Context) error {
-	if s.config.DryRun || s.state == nil {
+// CleanupPending verifies pending imports and reports unfinished operations
+// without replaying mutations. Verified imports may begin separately journaled
+// residual cleanup. Arr has no idempotency keys, so uncertain writes stay protected.
+func (s *Service) CleanupPending(ctx context.Context) error {
+	if s.config.DryRun || s.config.Mode == "unmatched" || s.state == nil {
 		return nil
 	}
+	_ = s.reconcileManualImports(ctx, nil)
 	pending := s.state.Pending()
 	if len(pending) == 0 {
 		return nil
@@ -193,12 +195,12 @@ func (s *Service) runBlockedQueueScan(ctx context.Context) {
 }
 
 func (s *Service) recoverBlockedQueue(ctx context.Context, client *arr.Client) error {
+	firstErr := s.reconcileManualImports(ctx, client)
 	queue, err := client.Queue(ctx)
 	if err != nil {
 		return fmt.Errorf("list queue: %w", err)
 	}
 
-	var firstErr error
 	recovered := 0
 	searched := map[string]bool{}
 	seen := map[string]bool{}

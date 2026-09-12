@@ -25,16 +25,26 @@ func (f MediaFile) SubjectID(kind string) int {
 }
 
 type Series struct {
-	ID   int    `json:"id"`
-	Year int    `json:"year"`
-	Path string `json:"path"`
+	ID              int              `json:"id"`
+	Year            int              `json:"year"`
+	Path            string           `json:"path"`
+	Title           string           `json:"title,omitempty"`
+	AlternateTitles []AlternateTitle `json:"alternateTitles,omitempty"`
 }
 
 type Movie struct {
-	ID         int    `json:"id"`
-	Year       int    `json:"year"`
-	Path       string `json:"path"`
-	FolderPath string `json:"folderPath"`
+	ID              int              `json:"id"`
+	Year            int              `json:"year"`
+	Path            string           `json:"path"`
+	FolderPath      string           `json:"folderPath"`
+	Title           string           `json:"title,omitempty"`
+	OriginalTitle   string           `json:"originalTitle,omitempty"`
+	AlternateTitles []AlternateTitle `json:"alternateTitles,omitempty"`
+}
+
+type AlternateTitle struct {
+	Title        string `json:"title"`
+	SeasonNumber int    `json:"seasonNumber"`
 }
 
 type HistoryRecord struct {
@@ -56,6 +66,7 @@ type HistoryPage struct {
 type QueueRecord struct {
 	ID                    int                  `json:"id"`
 	DownloadID            string               `json:"downloadId"`
+	OutputPath            string               `json:"outputPath"`
 	MovieID               int                  `json:"movieId"`
 	SeriesID              int                  `json:"seriesId"`
 	EpisodeID             int                  `json:"episodeId"`
@@ -148,11 +159,17 @@ type WebhookPayload struct {
 }
 
 type Episode struct {
-	ID            int        `json:"id"`
-	SeriesID      int        `json:"seriesId"`
-	EpisodeFileID int        `json:"episodeFileId"`
-	AirDate       string     `json:"airDate"`
-	AirDateUTC    *time.Time `json:"airDateUtc"`
+	ID                         int        `json:"id"`
+	SeriesID                   int        `json:"seriesId"`
+	EpisodeFileID              int        `json:"episodeFileId"`
+	AirDate                    string     `json:"airDate"`
+	AirDateUTC                 *time.Time `json:"airDateUtc"`
+	SeasonNumber               *int       `json:"seasonNumber,omitempty"`
+	EpisodeNumber              *int       `json:"episodeNumber,omitempty"`
+	AbsoluteEpisodeNumber      *int       `json:"absoluteEpisodeNumber,omitempty"`
+	SceneSeasonNumber          *int       `json:"sceneSeasonNumber,omitempty"`
+	SceneEpisodeNumber         *int       `json:"sceneEpisodeNumber,omitempty"`
+	SceneAbsoluteEpisodeNumber *int       `json:"sceneAbsoluteEpisodeNumber,omitempty"`
 }
 
 func (e Episode) ReleaseYear() int {

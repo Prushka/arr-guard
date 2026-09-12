@@ -25,12 +25,29 @@ type StoredWebhook struct {
 // A phase is persisted BEFORE its network mutation. An unfinished operation is
 // a safety latch, not permission to replay a non-idempotent request after restart.
 type Operation struct {
-	Kind             string `json:"kind"`
-	SubjectID        int    `json:"subjectId"`
-	FileID           int    `json:"fileId,omitempty"`
-	DownloadID       string `json:"downloadId,omitempty"`
-	EpisodeIDs       []int  `json:"episodeIds,omitempty"`
-	Phase            string `json:"phase"`
-	AutomaticSearch  bool   `json:"automaticSearch,omitempty"`
-	SearchEpisodeIDs []int  `json:"searchEpisodeIds,omitempty"`
+	Kind             string         `json:"kind"`
+	SubjectID        int            `json:"subjectId"`
+	FileID           int            `json:"fileId,omitempty"`
+	DownloadID       string         `json:"downloadId,omitempty"`
+	EpisodeIDs       []int          `json:"episodeIds,omitempty"`
+	Phase            string         `json:"phase"`
+	AutomaticSearch  bool           `json:"automaticSearch,omitempty"`
+	SearchEpisodeIDs []int          `json:"searchEpisodeIds,omitempty"`
+	Import           *PendingImport `json:"import,omitempty"`
+}
+
+// Import sources and expected targets survive restart; acknowledgements alone
+// never establish that Arr actually imported the selected files.
+type PendingImport struct {
+	CommandID    int                 `json:"commandId,omitempty"`
+	HistoryAfter int                 `json:"historyAfter"`
+	OutputPath   string              `json:"outputPath"`
+	Files        []ImportExpectation `json:"files"`
+}
+
+type ImportExpectation struct {
+	Source     string `json:"source"`
+	Size       int64  `json:"size"`
+	EpisodeIDs []int  `json:"episodeIds,omitempty"`
+	Year       int    `json:"year"`
 }

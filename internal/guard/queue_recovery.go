@@ -215,6 +215,13 @@ func (s *Service) recoverQueueItem(ctx context.Context, c *arr.Client, item arr.
 	}
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	operation := c.Kind() + ":queue:" + strings.ToLower(item.DownloadID)
+	if s.state.IsCompleted(operation) {
+		return nil
+	}
+	if pending, ok := s.state.Pending()[operation]; ok && pending.Import != nil {
+		return s.reconcileManualImport(ctx, c, operation, pending)
+	}
 	plan, err := s.planQueueRecovery(ctx, c, item, searched)
 	if err != nil || len(plan.rows) == 0 {
 		return err
@@ -248,6 +255,11 @@ func (s *Service) recoverQueueItem(ctx context.Context, c *arr.Client, item arr.
 	keys := []string{}
 	if plan.search {
 		keys = retryKeys(c.Kind(), arr.MediaFile{ParentID: subject, MovieID: subject}, plan.searchIDs)
+	}
+	for _, key := range keys {
+		if s.state.Attempts(key) >= s.config.MaxAttempts && item.AllowsMatchedIDImport(c.Kind()) {
+			return s.importExhaustedQueue(ctx, c, item, plan, keys)
+		}
 	}
 	s.log.Warn("blocked download recovery planned", "arr", c.Kind(), "queue_id", item.ID, "episodes", len(plan.episodeIDs), "search_episode_ids", plan.searchIDs, "search", plan.search, "remove_from_client", true, "dry_run", s.config.DryRun)
 	if s.config.DryRun {

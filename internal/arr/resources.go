@@ -15,6 +15,12 @@ func (c *Client) GetMovie(ctx context.Context, id int) (Movie, error) {
 	return movie, err
 }
 
+func (c *Client) Movies(ctx context.Context) ([]Movie, error) {
+	var movies []Movie
+	err := c.do(ctx, http.MethodGet, c.apiPath("movie"), nil, nil, &movies)
+	return movies, err
+}
+
 func (c *Client) MovieFiles(ctx context.Context, movieID int) ([]MediaFile, error) {
 	var files []MediaFile
 	err := c.do(ctx, http.MethodGet, c.apiPath("moviefile"), url.Values{"movieId": {strconv.Itoa(movieID)}}, nil, &files)
