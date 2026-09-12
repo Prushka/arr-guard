@@ -6,6 +6,43 @@ write, deletion, move, or rename is used for verification. `.env` is read privat
 by an opt-in test harness; it is not changed. Mutation scenarios use local HTTP
 fixtures and temporary test media.
 
+## Imported-file attempt limit correction — September 12
+
+The imported-file budget now gates the complete remediation sequence. Once any
+movie/authoritatively mapped episode counter reaches `MAX_ATTEMPTS`, Guard logs a
+policy skip before origin lookup, deletion, queue removal, failure/blocklisting,
+or search. It neither increments the counter nor creates an operation record.
+This applies in scan and serve, including histories that would cause Arr-owned
+automatic redownload. The final allowed attempt still completes; an already
+exhausted or previously over-limit counter preserves subsequent rejected files.
+A valid file can still reset its counters under the existing snapshot rules.
+Uncertain operations retain their journal protection; this change does not replay
+or undo previous mutations. It does not cancel searches already started by Arr.
+The conditional waiting-import fallback remains a separate workflow.
+
+Native tests, race detection, `go vet`, lint (zero issues), and Linux/amd64
+application/test compilation passed. Local fixtures cover at-limit and over-limit
+files in full scans, dry runs, and concurrent webhooks for both Arr applications:
+automatic/interactive recovery, Guard-owned searches, queued origins, absent or
+unavailable history, and already-failed origins. They assert no API mutations,
+media changes, counter changes, new operations, or origin reads. Boundary tests
+verify the last permitted attempt completes and a new file ID after restart cannot
+evade the persisted budget. A single exhausted episode protects a combined file
+without charging its other episodes; valid snapshot-checked files can still reset
+their counters.
+
+Live GET-only verification made **125 GETs**: 29 for real probes, ordinary
+scan/webhook checks, and the new limit checks; 96 for the existing ten queue
+recovery plans. Both previously reported English-subtitle examples remained
+accepted, and the identified PGS subtitle error remained protected. For the cap
+checks, isolated test memory simulated exhausted budgets and rejected validation
+while retaining current Arr ownership and real media snapshots. Both scan and
+webhook paths logged policy skips with no state changes. These injected checks do
+not claim that the two live files lack subtitles or that production counters were
+exhausted. All live requests were GET-only; no production API mutations, runtime
+state/configuration writes, or media writes occurred. Neither deployment nor Linux
+runtime execution was performed. Logs are under ignored `logs/`.
+
 ## Exhausted matched-by-ID import follow-up — September 12
 
 Completed waiting-import downloads can now use Arr's manual-import workflow after
@@ -84,8 +121,9 @@ Remaining limits: unknown identities and invalid subtitles stay protected; an
 unconfigured Arr consumer cannot be coordinated. Arr offers no atomic transaction
 across preflight and command submission, so external-import races cannot be fully
 eliminated. Unverifiable command/cleanup outcomes remain journaled. This fallback
-does not change imported-file remediation or bound Arr's independent automatic
-replacement searches. Positive server mutation behavior was verified only with
+did not change imported-file remediation; the attempt-limit correction above
+subsequently added that gate. Arr's independently initiated replacement searches
+remain outside Guard's control. Positive server mutation behavior was verified only with
 local fixtures; no deployment was performed.
 
 ## Findings and fixes
@@ -129,8 +167,10 @@ The effective policy is read before deletion and rechecked immediately before
 history failure. The journal records `automaticSearch` before the request, and
 uncertain outcomes never cause a fallback search or blind replay. Unknown
 required settings still stop remediation. Server settings are never changed.
-`MAX_ATTEMPTS` bounds guard-issued searches within remediation attempts; it
-cannot suppress Arr's independent automatic searches, including at the cap.
+That follow-up originally bounded only guard-issued searches and continued
+history failure at the cap. The imported-file attempt-limit correction above now
+skips the entire sequence at the cap, preventing new Guard-triggered automatic
+searches. It cannot suppress searches Arr already started or initiates independently.
 Arr can search a shared release's episodes or an entire season. External changes
 between the final configuration read and the failure request remain a race that
 the API cannot make atomic.

@@ -201,12 +201,12 @@ func TestHistorySearchFailureNeverFallsBackOrReplays(t *testing.T) {
 	}
 }
 
-func TestAutomaticHistorySearchStillCompletesAtGuardLimit(t *testing.T) {
+func TestAutomaticHistorySearchCompletesLastAllowedAttempt(t *testing.T) {
 	for _, kind := range []string{"sonarr", "radarr"} {
 		f := historySearchFixture(t, kind, "Rss")
 		f.autoRedownload = true
 		for _, key := range retryKeys(kind, f.file, []int{10, 12}) {
-			for i := 0; i < f.service.config.MaxAttempts; i++ {
+			for i := 0; i < f.service.config.MaxAttempts-1; i++ {
 				if _, err := f.service.state.Increment(key); err != nil {
 					t.Fatal(err)
 				}
@@ -217,6 +217,11 @@ func TestAutomaticHistorySearchStillCompletesAtGuardLimit(t *testing.T) {
 		}
 		if len(f.mutations) != 2 || len(f.commands) != 0 || len(f.service.state.Pending()) != 0 {
 			t.Fatalf("remediation at cap: %v", f.mutations)
+		}
+		for _, key := range retryKeys(kind, f.file, []int{10, 12}) {
+			if f.service.state.Attempts(key) != f.service.config.MaxAttempts {
+				t.Fatal("last allowed attempt was not counted")
+			}
 		}
 	}
 }

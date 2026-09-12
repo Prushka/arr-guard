@@ -299,12 +299,19 @@ Arr resources nor state.
    single/combined episode releases cannot reset the limit. Valid replacements
    clear those counters in both library scans and webhook jobs only if the media
    and matching-subtitle snapshots still match. Legacy composite episode keys
-   migrate to each episode's maximum count. The guard issues
-   replacement searches only within `MAX_ATTEMPTS` remediation attempts; a later
-   invalid managed file is still deleted and blocklisted without another guard
-   search. Arr's automatic redownload can still search at that point: its searches
-   are controlled by Arr's settings and cannot be capped by the guard through the
-   history-failure API. Queue recovery stops before removing another download
+   migrate to each episode's maximum count. Before starting imported-file
+   remediation, Guard checks `MAX_ATTEMPTS` for the movie or every episode mapped
+   to that file. If any counter is already at or above the limit, it skips the
+   entire sequence: no file deletion, queue removal, failure/blocklisting, search,
+   counter increment, or new operation journal. This applies in scan and serve,
+   even with Arr automatic redownload enabled. With a limit of six, the sixth
+   reserved attempt finishes normally; a later rejected file remains in place.
+   Existing counters above the limit are preserved and also stop remediation.
+   The log says `subtitle remediation skipped; attempt limit reached`; this is a
+   policy skip, not a successful subtitle validation or a job to retry indefinitely.
+   Guard does not trigger Arr's automatic replacement at the cap, because it sends
+   no failure request. Searches already started or initiated independently by Arr
+   are outside Guard's control. Queue recovery stops before removing another download
    when a needed search target has reached its limit; cleanup of all-existing
    targets does not require another search attempt.
 

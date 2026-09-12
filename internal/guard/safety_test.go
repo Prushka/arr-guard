@@ -455,7 +455,7 @@ func TestConcurrentDuplicateWebhooksAndAuditOnlyDeleteOnce(t *testing.T) {
 	}
 }
 
-func TestRetryLimitStillBlocklistsTerminalFile(t *testing.T) {
+func TestRetryLimitPreservesTerminalFileAndQueue(t *testing.T) {
 	f := newSafetyFixture(t, "radarr")
 	f.history = []arr.HistoryRecord{{ID: 2, MovieID: 3, DownloadID: "origin", EventType: "downloadFolderImported", Data: map[string]string{"fileId": "17"}}}
 	f.queue = []arr.QueueRecord{{ID: 7, MovieID: 3, DownloadID: "origin", Status: "completed", TrackedDownloadState: "imported"}}
@@ -468,8 +468,8 @@ func TestRetryLimitStillBlocklistsTerminalFile(t *testing.T) {
 	if err := f.apply(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.mutations) != 2 || len(f.commands) != 0 {
-		t.Fatal("terminal rejection was not blocklisted or was searched")
+	if len(f.mutations) != 0 || len(f.commands) != 0 || f.deleted || len(f.queue) != 1 || f.service.state.Attempts(key) != 3 {
+		t.Fatal("exhausted rejection changed media, queue, or attempts")
 	}
 }
 
@@ -484,7 +484,7 @@ func TestMultiEpisodeRetryKeysCarryAcrossReleaseGrouping(t *testing.T) {
 	if err := f.apply(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.commands) != 0 || f.service.state.Attempts(keys[1]) != 4 {
+	if len(f.mutations) != 0 || f.deleted || f.service.state.Attempts(keys[0]) != 3 || f.service.state.Attempts(keys[1]) != 0 {
 		t.Fatal("episode retry cap bypassed by a pack")
 	}
 }

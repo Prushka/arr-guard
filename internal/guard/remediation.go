@@ -166,6 +166,20 @@ func (s *Service) applyValidationWithOrigin(ctx context.Context, client *arr.Cli
 		}
 		return nil
 	}
+	if s.config.MaxAttempts < 1 {
+		return errors.New("invalid maximum attempts")
+	}
+	attempts := 0
+	for _, key := range keys {
+		attempts = max(attempts, s.state.Attempts(key))
+	}
+	// The budget covers the entire destructive sequence, including history
+	// failure that can start Arr's own search. Check under mutationMu before
+	// origin reads or Begin; any exhausted episode protects a shared media file.
+	if attempts >= s.config.MaxAttempts {
+		s.log.Warn("subtitle remediation skipped; attempt limit reached", "arr", client.Kind(), "file_id", file.ID, "attempts", attempts, "max_attempts", s.config.MaxAttempts, "reason", validation.Reason, "dry_run", s.config.DryRun)
+		return nil
+	}
 	downloadID, _, err := s.findOrigin(ctx, client, file)
 	if err != nil {
 		return fmt.Errorf("resolve origin before deletion: %w", err)
@@ -181,9 +195,6 @@ func (s *Service) applyValidationWithOrigin(ctx context.Context, client *arr.Cli
 		return fmt.Errorf("origin safety preflight: %w", err)
 	}
 	s.log.Warn("subtitle validation failed", "arr", client.Kind(), "file_id", file.ID, "reason", validation.Reason, "dry_run", s.config.DryRun, "arr_automatic_search", origin.automaticSearch)
-	if s.config.MaxAttempts < 1 {
-		return errors.New("invalid maximum attempts")
-	}
 	// Check both the current Arr resource and the exact local file after all
 	// potentially slow history/queue reads, immediately before the write boundary.
 	fresh, err = client.GetMediaFile(ctx, file.ID)
@@ -235,8 +246,8 @@ func (s *Service) finishMediaRemediation(ctx context.Context, client *arr.Client
 	if err := s.state.Phase(key, "deleted"); err != nil {
 		return err
 	}
-	// Always finish origin remediation. Arr's automatic recovery is independent
-	// of the guard's search budget and must never be followed by a duplicate search.
+	// Finish the attempt reserved below the limit, including the last allowed
+	// attempt. Never duplicate the search when Arr owns automatic recovery.
 	if origin.queueID > 0 || origin.historyID > 0 {
 		if origin.historyID > 0 {
 			// Settings may have changed during deletion. Use the latest decision

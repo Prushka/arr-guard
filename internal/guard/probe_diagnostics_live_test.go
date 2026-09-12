@@ -130,6 +130,7 @@ func TestLiveProbeDiagnostics(t *testing.T) {
 				t.Fatalf("webhook dry run: %s", liveErrorCategory(err))
 			}
 			t.Logf("valid=%t subtitles=%t English=%t unidentified=%t ignored_non_subtitle_diagnostic=%t repeated_probe=matched preflight=passed webhook=passed", v.Valid, v.HasSubtitles, v.HasEnglish, v.HasUnknownLanguage, len(v.ProbeWarnings) > 0)
+			testLiveRemediationLimit(t, service, client, file, v, path)
 		})
 	}
 	if expectedPath != "" && !exampleFound {

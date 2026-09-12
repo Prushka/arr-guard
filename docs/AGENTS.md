@@ -99,8 +99,14 @@ passes; completion does not mean every probe or remediation preflight succeeded.
   whether Arr will search for the selected grabbed release, including the
   interactive-search exception; skip the guard's duplicate search when Arr owns
   replacement. Never change server settings. Keep unknown-config and uncertain
-  mutation outcomes protected. MAX_ATTEMPTS limits guard-issued searches, not
-  Arr's independent automatic recovery. Leave queued origins alone until Arr
+  mutation outcomes protected. MAX_ATTEMPTS gates the entire imported-file
+  remediation before origin reads, deletion, failure/blocklisting, or search.
+  If any authoritative episode/movie counter is at or above the limit, log a
+  policy skip and preserve media, counters, and operation state. The last allowed
+  attempt finishes normally; later rejected files stay in place in scan and serve.
+  Valid snapshot-checked files retain their existing retry-reset behavior.
+  Guard cannot cancel searches Arr already started or initiates independently.
+  Leave queued origins alone until Arr
   reports the whole download imported;
   queued Sonarr episodes must all have managed files.
 - Serialize mutation sequences, persist their phase before each network write, and
@@ -295,3 +301,12 @@ were applied only in test memory. Existing queue and probe regression checks use
 114 GETs. No production API mutations, state/configuration writes, or media changes
 occurred; positive import/cleanup behavior was tested only locally. AUDIT.md records
 the outcome and limits.
+
+The imported-file attempt-limit correction passed native tests, race detection,
+vet, lint (zero issues), and Linux/amd64 application/test compilation. Local
+fixtures verify complete mutation suppression at/above the cap, the last allowed
+attempt, multi-episode protection, restart/new-file IDs, and valid-file resets.
+Live checks used 125 GETs with zero production mutations or state/media writes;
+cap scenarios used explicitly simulated rejection/counters with real ownership
+and snapshots. Existing real probe outcomes and queue plans remained unchanged.
+Do not describe the limit as guarding only Guard's own search command.
