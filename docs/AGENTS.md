@@ -35,7 +35,7 @@ ignored `bin/`. Do not move or print `.env` or commit private runtime artifacts.
 - `internal/arr`: v3 HTTP client, resource models, queue status classification,
   and automatic-redownload policy reads. HTTP details stay inside this package.
 - `internal/probe`: ffprobe, matching sidecars, snapshot validation, and bounded
-  diagnostics; unknown/subtitle/container failures remain protected.
+  diagnostics; unknown/subtitle/stream-discovery failures remain protected.
 - `internal/pathutil`: path normalization, containment, mapping, file identity,
   and supported media/subtitle extensions; no filesystem mutations.
 - `internal/guard`: orchestration and its durable state. `run.go` handles startup
@@ -94,10 +94,14 @@ passes; completion does not mean every probe or remediation preflight succeeded.
 - A valid probe may reset retry counters only while its media and
   matching-subtitle snapshots still match; a changed/missing snapshot preserves
   counters. Ignore unrelated directory mtime changes, retain directory identity.
-- A successful ffprobe may continue past only the exact MPEG-2 error-level
-  `Invalid frame dimensions 0x0.` diagnostic when all reported MPEG-2 video streams
-  have positive dimensions. Keep severity/context, complete JSON, output bounds,
-  and snapshots enforced. Other diagnostics still fail with their actual text.
+- A successful ffprobe ignores decoder diagnostics whose contexts match only
+  reported audio/video codecs, regardless of decoder error/fatal severity or video
+  dimensions. Explicit subtitle/caption/user-data errors remain protected even
+  inside a video decoder. A context also matching the reported container is
+  ambiguous; allow only its exact chapter end-before-start timestamp diagnostic.
+  Keep other container, unknown/unclassified, and subtitle failures protected.
+  Keep complete JSON, output bounds, exit status, and snapshots enforced. Classify
+  full stderr before deduplicating, sanitizing, and bounding warning/error logs.
   Never infer a subtitle language from the codec name. Disable FFREPORT and forced
   color in the ffprobe child process; probes must not create report files.
 - Bind the HTTP listener before starting workers. Stop cancels in-flight probes
@@ -232,3 +236,13 @@ Native tests, race detection, vet, and lint passed. Local fixtures cover the new
 reasons, scoped replacements, dry run, and missing/conflicting history refusals.
 Live queue dry runs planned 15 downloads using 141 GETs with no mutations, state
 writes, or media changes; actual removal/search behavior was tested only locally.
+
+Subtitle-only diagnostic follow-up replaces the original MPEG-2-only exception
+with the stream/context rules above. Native tests, race detection, vet, lint, and
+Linux/amd64 application/test compilation passed. Real disposable fixtures exercise
+malformed chapters and JPEG attachments with/without English subtitles; local Arr
+fixtures exercise both policy outcomes and counter resets. Both reported live
+files now pass. The final 14-file GET/dry-run set accepted 13 files through both
+scan/webhook checks and retained one actual PGS subtitle bitmap failure; five
+historical IDs were unavailable. No live API mutations, state writes, or media
+changes occurred. See AUDIT.md for counts, failed reads, and verification limits.

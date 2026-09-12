@@ -14,7 +14,7 @@ fixtures and temporary test media.
 | API boundary | Redirects could forward the API key; successful empty/malformed responses could create zero-value resources | Redirects disabled; independent read-only client gate; resource identity and bounded JSON validation |
 | Pagination | History stopped after 1,000 records; changing/repeating queue pages could misidentify work | Paginated history/queue reads with duplicate-ID, completeness, and page-limit checks |
 | File identity | Webhook paths/IDs and stale scan records could direct deletion/search | Authoritative Arr ownership, path, file snapshot, current episode mappings, and origin checks |
-| Probe safety | Changing/incomplete files, error diagnostics despite successful exit, and unbounded output could produce false rejection or resource exhaustion | Nonempty regular files, bounded output, narrow verified video-recovery exception, actual failure diagnostics, timeout/pipe cleanup, filesystem snapshots; failed probes leave media untouched |
+| Probe safety | Changing/incomplete files, error diagnostics despite successful exit, and unbounded output could produce false rejection or resource exhaustion | Nonempty regular files, bounded output, subtitle-relevant diagnostic classification, actual failure diagnostics, timeout/pipe cleanup, filesystem snapshots; failed probes leave media untouched |
 | Retry accounting | Composite episode groups, inconsistent resets, or a disappearing sidecar after validation could bypass or exhaust caps | Individual episode/movie counters, conservative legacy migration, valid-file resets guarded by media and matching-subtitle snapshots |
 | State persistence | In-memory state changed on failed writes; multiple processes could overwrite state | Copy-on-write persistence, exclusive OS lock, flushed replacement, server binding, failure latch |
 | Partial mutation | Process failure lost post-delete work; shutdown could repeat a committed action | Durable operation phase before every mutation; uncertain outcome requires reconciliation, never blind replay |
@@ -160,6 +160,9 @@ state takes precedence over deleting a file with an inconclusive probe or issuin
 unbounded replacement grabs. Reconciliation instructions are in README.md.
 
 ## Recoverable probe diagnostics — September 9
+
+This section records the original narrow exception. The September 12 subtitle-only
+diagnostics follow-up below supersedes its MPEG-2-only restriction.
 
 The original blanket stderr check treated any ffprobe error diagnostic as a
 failed subtitle probe and discarded its text on exit status zero. A reported
@@ -438,6 +441,59 @@ with zero preflight refusals across 141 GETs. There were no API mutations, retry
 writes, or media changes. These live results cover the current queue; each new
 diagnostic and actual mutation sequence was verified with local fixtures.
 Logs are saved under ignored `logs/import-reasons-*.log`.
+
+## Subtitle-only diagnostics follow-up — September 12
+
+The MPEG-2-only exception was too narrow for the requested subtitle policy. It
+still refused invalid chapter timestamps and JPEG decoder errors even when ffprobe
+reported English subtitles successfully. Classification now uses ffprobe's own
+codec types and container name. Audio/video decoder error and fatal messages can
+continue without requiring valid video dimensions. Container/decoder name collisions
+remain ambiguous; a container context permits only the exact chapter end-before-start
+timestamp error. Explicit subtitle/caption/user-data errors stay protected even
+inside a video decoder. Unknown contexts, unclassified continuation lines, and
+other container or stream-discovery errors also stay protected.
+
+This follows FFmpeg's [chapter handling](https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/demux_utils.c)
+and [JPEG decoding](https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/mjpegdec.c):
+the former drops an invalid chapter entry, while the latter can report image decode
+failure independently of subtitle streams. Full stream discovery stays enabled;
+the [ffprobe stream selector](https://ffmpeg.org/ffprobe.html#Main-options) changes
+stream output and cannot by itself suppress unrelated initialization errors.
+
+Ignored diagnostics are identified as non-subtitle warnings in logs, with the same
+deduplication, address removal, sanitization, and total 2,048-character text budget
+as failures. Classification sees all bounded stderr before log truncation. Nonzero
+process exit, timeout/cancellation, malformed or oversized output, and changed
+media/sidecar snapshots still stop validation. No language or age policy, runtime
+configuration defaults, remediation ordering, or retry accounting changed.
+
+Verification:
+
+- Native tests, race detection, vet, and lint (zero issues) passed; Linux/amd64
+  application and test compilation passed. The updated local tests cover audio,
+  MPEG-2, JPEG attachments, chapter timestamps, English/foreign/missing subtitles,
+  caption errors in video decoders, PGS bitmap errors, ambiguous contexts, late
+  failures beyond the logging budget, and existing output/snapshot protections.
+- Real ffmpeg/ffprobe fixtures reproduce bad chapter timestamps and a malformed
+  JPEG attachment both with and without English subtitles. Only disposable test
+  files are damaged; probes leave those files unchanged. Local Arr HTTP fixtures
+  verify rejection/remediation and successful validation/reset for both servers.
+- Both reported production files initially reproduced the refusal. After the
+  change they passed repeated probes and scan/webhook dry runs with English
+  subtitles detected (16 GETs, zero preflight blocks).
+- The historical 19-file live set now contains five file IDs returning HTTP 404;
+  that run failed those reads and made 122 GETs. The final 14-current-file run
+  completed with 117 GETs: 13 English-subtitle accepts reached both scan and webhook
+  preflights, with zero preflight blocks. Radarr file 275 still reports
+  `[pgssub] [error] Bitmap dimensions (648x67) invalid.` and stays protected because
+  it is a subtitle decoding failure. The unavailable IDs were not treated as passes.
+
+All live checks enforced forced dry run, an independent GET-only transport, and
+disabled redirects. They made zero API mutations, retry-state writes, or media
+changes. This was targeted verification, not a full-library probe pass; actual
+server mutations, Linux runtime, and deployment were not exercised. Logs are in
+ignored `logs/subtitle-diagnostics-*.log`.
 
 ## Initial audit verification
 

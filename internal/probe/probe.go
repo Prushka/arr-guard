@@ -45,9 +45,9 @@ func (p Prober) Validate(ctx context.Context, filePath string) (Validation, erro
 	cmd := exec.CommandContext(probeCtx, p.Path,
 		"-v", "repeat+level+error",
 		"-protocol_whitelist", "file,pipe,crypto",
-		// Include compact video metadata to verify recovery from a known decoder
-		// startup error. Only subtitle streams contribute to the language decision.
-		"-show_entries", "stream=codec_type,codec_name,width,height:stream_tags=language,title:stream_disposition=default,forced,hearing_impaired",
+		// Identify diagnostic contexts without making audio/video decoding quality
+		// part of subtitle policy. Keep full stream discovery enabled.
+		"-show_entries", "stream=codec_type,codec_name,width,height:stream_tags=language,title:stream_disposition=default,forced,hearing_impaired:format=format_name",
 		"-of", "json",
 		"-i", filePath,
 	)
@@ -71,7 +71,7 @@ func (p Prober) Validate(ctx context.Context, filePath string) (Validation, erro
 	if result.Streams == nil {
 		return Validation{}, withProbeDiagnostics(errors.New("ffprobe output is missing the streams array"), stderr.String())
 	}
-	warnings, err := classifyProbeDiagnostics(stderr.String(), result.Streams)
+	warnings, err := classifyProbeDiagnostics(stderr.String(), result)
 	if err != nil {
 		return Validation{}, err
 	}

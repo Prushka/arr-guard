@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -12,6 +13,80 @@ import (
 	"testing"
 	"time"
 )
+
+// Malformed bytes are written only to disposable test media, never library files.
+func TestRealFFprobeIgnoresNonSubtitleDamage(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg required for real probe fixture generation")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe required for real probe test")
+	}
+	for _, damage := range []string{"chapter", "jpeg"} {
+		for _, language := range []string{"eng", ""} {
+			t.Run(damage+"/"+language, func(t *testing.T) {
+				dir := t.TempDir()
+				media := filepath.Join(dir, "Movie.mkv")
+				sub := filepath.Join(dir, "input.srt")
+				metadata := filepath.Join(dir, "chapters.txt")
+				attachment := filepath.Join(dir, "bad.jpg")
+				for path, content := range map[string]string{
+					sub:        "1\n00:00:00,000 --> 00:00:00,800\nTest subtitle\n",
+					metadata:   ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=40\nEND=600\ntitle=Fixture chapter\n",
+					attachment: "not a JPEG image",
+				} {
+					if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				args := []string{"-v", "error", "-nostdin", "-f", "lavfi", "-i", "color=c=black:s=16x16:d=1", "-i", sub, "-f", "ffmetadata", "-i", metadata, "-map", "0:v"}
+				if language != "" {
+					args = append(args, "-map", "1:s", "-c:s", "srt", "-metadata:s:s:0", "language="+language)
+				}
+				if damage == "chapter" {
+					args = append(args, "-map_chapters", "2")
+				} else {
+					args = append(args, "-map_chapters", "-1", "-attach", attachment, "-metadata:s:t", "mimetype=image/jpeg")
+				}
+				args = append(args, "-t", "1", "-c:v", "ffv1", media)
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, ffmpeg, args...)
+				cmd.Env = probeEnvironment()
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("fixture generation: %v: %s", err, out)
+				}
+				before, err := os.ReadFile(media)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if damage == "chapter" {
+					// Matroska ChapterTimeEnd (0x92), four-byte value, 600ms in ns.
+					end := []byte{0x92, 0x84, 0x23, 0xc3, 0x46, 0x00}
+					if bytes.Count(before, end) != 1 {
+						t.Fatal("fixture chapter encoding is ambiguous or changed")
+					}
+					before = bytes.Replace(before, end, []byte{0x92, 0x84, 0, 0, 0, 0}, 1)
+					if err := os.WriteFile(media, before, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				v, err := (Prober{Path: ffprobe, Timeout: 10 * time.Second}).Validate(t.Context(), media)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if v.Valid != (language == "eng") || v.HasSubtitles != (language != "") || len(v.ProbeWarnings) == 0 {
+					t.Fatalf("non-subtitle damage changed policy: %+v", v)
+				}
+				if after, err := os.ReadFile(media); err != nil || !bytes.Equal(before, after) {
+					t.Fatal("probe changed fixture media")
+				}
+			})
+		}
+	}
+}
 
 func TestRealFFprobeSubtitleMatrix(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")

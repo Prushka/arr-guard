@@ -6,6 +6,9 @@ import (
 
 type ProbeResult struct {
 	Streams []ProbeStream `json:"streams"`
+	Format  struct {
+		Name string `json:"format_name"`
+	} `json:"format"`
 }
 
 type ProbeStream struct {

@@ -129,7 +129,7 @@ func TestLiveProbeDiagnostics(t *testing.T) {
 			if err := service.processWebhook(t.Context(), client, payload); err != nil {
 				t.Fatalf("webhook dry run: %s", liveErrorCategory(err))
 			}
-			t.Logf("valid=%t subtitles=%t English=%t unidentified=%t recovered_video_diagnostic=%t repeated_probe=matched preflight=passed webhook=passed", v.Valid, v.HasSubtitles, v.HasEnglish, v.HasUnknownLanguage, len(v.ProbeWarnings) > 0)
+			t.Logf("valid=%t subtitles=%t English=%t unidentified=%t ignored_non_subtitle_diagnostic=%t repeated_probe=matched preflight=passed webhook=passed", v.Valid, v.HasSubtitles, v.HasEnglish, v.HasUnknownLanguage, len(v.ProbeWarnings) > 0)
 		})
 	}
 	if expectedPath != "" && !exampleFound {
@@ -143,7 +143,7 @@ func TestLiveProbeDiagnostics(t *testing.T) {
 	if len(state.Attempts)+len(state.Operations)+len(state.Completed)+len(state.Webhooks) != 0 {
 		t.Fatal("dry run changed retry state")
 	}
-	t.Logf("files=%d accepted=%d rejected=%d probe_blocked=%d recovered_video=%d preflight_blocked=%d reported_example_found=%t GET_requests=%d mutations=0 retry_writes=0", len(values), accepted, rejected, blocked, recovered, preflightBlocked, exampleFound, reads)
+	t.Logf("files=%d accepted=%d rejected=%d probe_blocked=%d ignored_non_subtitle=%d preflight_blocked=%d reported_example_found=%t GET_requests=%d mutations=0 retry_writes=0", len(values), accepted, rejected, blocked, recovered, preflightBlocked, exampleFound, reads)
 }
 
 func liveSonarrProbeFileID(t *testing.T, client *arr.Client, path string) int {

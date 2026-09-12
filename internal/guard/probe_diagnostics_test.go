@@ -17,6 +17,16 @@ const recoveredVideoJSON = `{"codec_type":"video","codec_name":"mpeg2video","wid
 
 const recoveredVideoError = "[mpeg2video @ 000001A1234] [error] Invalid frame dimensions 0x0."
 
+func nonSubtitleDiagnosticFixtures() []struct{ name, streams, format, diagnostic string } {
+	return []struct{ name, streams, format, diagnostic string }{
+		{"MPEG2", recoveredVideoJSON, "mpegts", recoveredVideoError},
+		{"ZeroDimensionVideo", `{"codec_type":"video","codec_name":"mpeg2video"}`, "mpegts", "[mpeg2video @ 0x123] [error] slice mismatch"},
+		{"Chapters", `{"codec_type":"video","codec_name":"h264"}`, "matroska,webm", "[matroska,webm @ 0x123] [error] Chapter end time 0 before start 40040000000\n[matroska,webm @ 0x123] [error] Chapter end time 0 before start 130297000000"},
+		{"JPEG", `{"codec_type":"video","codec_name":"h264"},{"codec_type":"video","codec_name":"mjpeg","disposition":{"attached_pic":1}}`, "matroska,webm", "[mjpeg @ 0x123] [error] dqt: invalid precision\n[mjpeg @ 0x123] [error] unable to decode APP fields: Invalid data found when processing input\n[mjpeg @ 0x123] [fatal] No JPEG data found in image"},
+		{"Audio", `{"codec_type":"video","codec_name":"h264"},{"codec_type":"audio","codec_name":"aac"}`, "matroska,webm", "[aac @ 0x123] [error] Error decoding AAC frame header."},
+	}
+}
+
 func fixtureDiagnosticProber(t *testing.T, output, diagnostic string, exitCode int) probe.Prober {
 	t.Helper()
 	dir := t.TempDir()
@@ -86,19 +96,18 @@ func TestUnreliableProbeDiagnosticsStillBlock(t *testing.T) {
 		exitCode                 int
 	}{
 		{"SubtitleError", goodJSON, "[subrip @ 0x123] [error] Invalid subtitle packet", 0},
+		{"PGSBitmapError", goodJSON, "[pgssub @ 0x123] [error] Bitmap dimensions (648x67) invalid.", 0},
 		{"ContainerError", goodJSON, "[mpegts @ 0x123] [error] Packet corrupt", 0},
 		{"MixedErrors", goodJSON, recoveredVideoError + "\n[arib_caption @ 0x456] [error] Invalid caption data", 0},
-		{"UnknownVideoError", goodJSON, "[mpeg2video @ 0x123] [error] slice mismatch", 0},
-		{"FatalSeverity", goodJSON, strings.Replace(recoveredVideoError, "[error]", "[fatal]", 1), 0},
+		{"UnknownDecoder", goodJSON, "[unknowncodec @ 0x123] [error] slice mismatch", 0},
+		{"VideoCaptionError", goodJSON, "[mpeg2video @ 0x123] [error] Invalid A53 caption data", 0},
 		{"MissingSeverity", goodJSON, strings.Replace(recoveredVideoError, "[error] ", "", 1), 0},
 		{"WrongContext", goodJSON, strings.Replace(recoveredVideoError, "mpeg2video", "mpegts", 1), 0},
-		{"UnknownDimensions", goodJSON, strings.Replace(recoveredVideoError, "0x0.", "0x1080.", 1), 0},
 		{"ExitFailure", goodJSON, recoveredVideoError, 1},
 		{"MalformedJSON", `{"streams":[`, recoveredVideoError, 0},
 		{"MissingStreams", `{}`, recoveredVideoError, 0},
 		{"NoRecoveryEvidence", `{"streams":[]}`, recoveredVideoError, 0},
-		{"StillZeroDimensions", strings.Replace(goodJSON, `"width":1440`, `"width":0`, 1), recoveredVideoError, 0},
-		{"AnotherUnrecoveredVideo", `{"streams":[` + recoveredVideoJSON + `,{"codec_type":"video","codec_name":"mpeg2video"}]}`, recoveredVideoError, 0},
+		{"AmbiguousCodecType", `{"streams":[` + recoveredVideoJSON + `,{"codec_type":"subtitle","codec_name":"mpeg2video"}]}`, recoveredVideoError, 0},
 		{"UnknownAfterManyAllowedLines", goodJSON, strings.Repeat(recoveredVideoError+"\n", 200) + "[mpegts @ 0x123] [error] Packet corrupt", 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -124,38 +133,43 @@ func TestUnreliableProbeDiagnosticsStillBlock(t *testing.T) {
 }
 
 func TestRecoveredProbeCanCompleteLocalRemediation(t *testing.T) {
-	for _, kind := range []string{"sonarr", "radarr"} {
-		for _, valid := range []bool{true, false} {
-			f := newSafetyFixture(t, kind)
-			subtitle := ""
-			if valid {
-				subtitle = `,{"codec_type":"subtitle","tags":{"language":"eng"}}`
-			}
-			p := fixtureDiagnosticProber(t, `{"streams":[`+recoveredVideoJSON+subtitle+`]}`, recoveredVideoError, 0)
-			f.service.probeFn = p.Validate
-			keys := retryKeys(kind, f.file, []int{10, 12})
-			for _, key := range keys {
-				if _, err := f.service.state.Increment(key); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := f.service.auditFile(t.Context(), f.client, f.file); err != nil {
-				t.Fatal(err)
-			}
-			if valid {
-				if len(f.mutations) != 0 {
-					t.Fatal("accepted file mutated")
-				}
-				for _, key := range keys {
-					if f.service.state.Attempts(key) != 0 {
-						t.Fatal("valid file did not reset counters")
+	for _, diagnostic := range nonSubtitleDiagnosticFixtures() {
+		for _, kind := range []string{"sonarr", "radarr"} {
+			for _, language := range []string{"eng", "fra", ""} {
+				t.Run(diagnostic.name+"/"+kind+"/"+language, func(t *testing.T) {
+					valid := language == "eng"
+					f := newSafetyFixture(t, kind)
+					subtitle := ""
+					if language != "" {
+						subtitle = `,{"codec_type":"subtitle","tags":{"language":"` + language + `"}}`
 					}
-				}
-			} else if len(f.commands) != 1 || len(f.mutations) != 2 || len(f.service.state.Pending()) != 0 {
-				t.Fatal("recovered video diagnostic blocked local remediation")
-			}
-			if _, err := os.Stat(f.file.Path); err != nil {
-				t.Fatal("guard modified fixture media")
+					p := fixtureDiagnosticProber(t, `{"streams":[`+diagnostic.streams+subtitle+`],"format":{"format_name":"`+diagnostic.format+`"}}`, diagnostic.diagnostic, 0)
+					f.service.probeFn = p.Validate
+					keys := retryKeys(kind, f.file, []int{10, 12})
+					for _, key := range keys {
+						if _, err := f.service.state.Increment(key); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := f.service.auditFile(t.Context(), f.client, f.file); err != nil {
+						t.Fatal(err)
+					}
+					if valid {
+						if len(f.mutations) != 0 {
+							t.Fatal("accepted file mutated")
+						}
+						for _, key := range keys {
+							if f.service.state.Attempts(key) != 0 {
+								t.Fatal("valid file did not reset counters")
+							}
+						}
+					} else if len(f.commands) != 1 || len(f.mutations) != 2 || len(f.service.state.Pending()) != 0 {
+						t.Fatal("recovered video diagnostic blocked local remediation")
+					}
+					if _, err := os.Stat(f.file.Path); err != nil {
+						t.Fatal("guard modified fixture media")
+					}
+				})
 			}
 		}
 	}

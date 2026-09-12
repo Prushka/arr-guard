@@ -174,14 +174,19 @@ also requires `DRY_RUN=false`.
    `.usf`, `.scc`, `.stl`, and `.mks`. Empty/nonregular matching sidecars stop
    validation, allowing incomplete imports to finish. Image pixels are not OCR'd;
    stream language/title metadata and sidecar filenames determine language.
-   A successful probe can continue past the exact MPEG-2 video diagnostic
-   `Invalid frame dimensions 0x0.` only when every reported MPEG-2 video stream
-   has recovered positive dimensions and no other error is present. The app logs
-   that diagnostic as a warning and applies the normal subtitle policy. Other
-   diagnostics, nonzero exit status, malformed output, cancellation, and timeouts
-   still stop validation. Failure logs now include the actual diagnostic text,
-   with duplicate lines removed and long output truncated for logging; the full
-   bounded output is checked before that truncation. ARIB and other codec names
+   A successful probe ignores audio/video decoder errors when their log context
+   matches codecs reported as audio/video in the stream inventory. This includes
+   JPEG/cover-art failures, even fatal decoder messages or missing video dimensions;
+   they do not establish subtitle absence. The exact `Chapter end time ... before
+   start ...` error from the reported container is also unrelated to subtitles.
+   These diagnostics are logged as ignored warnings; normal subtitle policy applies.
+   Subtitle/caption errors (including caption data parsed by video decoders),
+   ambiguous or unknown diagnostic contexts, and other container/discovery errors
+   still stop validation. Nonzero exit status, malformed output, cancellation,
+   timeouts, and output limits also stop validation. Both ignored and blocking
+   diagnostics retain their actual text, with duplicates removed and long output
+   truncated for logging; the full bounded stderr is checked first. This is subtitle
+   validation, not a guarantee that audio/video plays correctly. ARIB and other codec names
    do not establish subtitle language. Probes also disable inherited `FFREPORT`
    settings to prevent implicit report-file writes.
 3. Accept English subtitles (`en`, `eng`, `en-US`, `English`). For media more than
