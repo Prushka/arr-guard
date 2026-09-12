@@ -122,6 +122,9 @@ Completed `importBlocked` downloads remain eligible. Completed `importPending`
 - Unable to parse file.
 - A quality "was unexpected considering the" grabbed release.
 - Unable to determine if file is a sample.
+- Found matching movie via grab history, but release was matched to movie by ID.
+- Found matching series via grab history, but release was matched to series by ID.
+- Caution: Found executable file.
 
 Recovery groups every queue row sharing the download ID, including unknown-item
 rows, and resolves the full episode/movie scope using current queue and grabbed/

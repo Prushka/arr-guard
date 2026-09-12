@@ -35,6 +35,10 @@ func TestQueueWaitingImportReasons(t *testing.T) {
 		"Unable to parse file",
 		"BDRip-1080p was unexpected considering the release was grabbed as HDTV-1080p",
 		"Unable to determine if file is a sample",
+		"Found matching movie via grab history, but release was matched to movie by ID",
+		"Found matching series via grab history, but release was matched to series by ID",
+		"Caution: Found executable file",
+		"Caution: Found executable file: fixture.exe",
 	}
 	for _, reason := range reasons {
 		q := pendingQueueItem(7, 10, "pack", strings.ToUpper(reason))
@@ -56,9 +60,69 @@ func TestQueueWaitingImportReasons(t *testing.T) {
 			t.Error("incomplete download accepted")
 		}
 	}
-	for _, reason := range []string{"", "Permission denied", "Path does not exist", "Some unrelated quality message", "Some file named Unable to parse file.mkv"} {
+	for _, reason := range []string{
+		"", "Permission denied", "Path does not exist", "Some unrelated quality message",
+		"Some file named Unable to parse file.mkv",
+		"Found matching movie via grab history",
+		"Found matching series via grab history",
+		"Some file named Caution: Found executable file.mkv",
+	} {
 		if pendingQueueItem(7, 10, "pack", reason).NeedsImportRecovery() {
 			t.Errorf("unknown reason accepted: %s", reason)
+		}
+	}
+}
+
+func TestQueueHistoryIDAndExecutableRecovery(t *testing.T) {
+	for _, test := range []struct{ name, kind, reason string }{
+		{"movieID", "radarr", "Found matching movie via grab history, but release was matched to movie by ID"},
+		{"seriesID", "sonarr", "Found matching series via grab history, but release was matched to series by ID"},
+		{"movieExecutable", "radarr", "Caution: Found executable file"},
+		{"seriesExecutable", "sonarr", "Caution: Found executable file"},
+	} {
+		for _, scenario := range []string{"recover", "dryRun", "missingHistory", "conflictingHistory"} {
+			t.Run(test.name+"/"+scenario, func(t *testing.T) {
+				f := newSafetyFixture(t, test.kind)
+				f.deleted = true // Only the fake Arr API reports missing library media.
+				f.service.config.DryRun = scenario == "dryRun"
+				f.queue = []arr.QueueRecord{pendingQueueItem(7, 10, "pack", test.reason)}
+				f.emptyQueueHistory = scenario == "missingHistory"
+				if scenario == "conflictingHistory" {
+					f.history = []arr.HistoryRecord{{ID: 1, MovieID: 4, SeriesID: 4, EpisodeID: 10, DownloadID: "pack", EventType: "grabbed"}}
+				}
+				err := f.service.recoverBlockedQueue(t.Context(), f.client)
+				blocked := scenario == "missingHistory" || scenario == "conflictingHistory"
+				if (err != nil) != blocked {
+					t.Fatalf("recovery error = %v, want blocked = %t", err, blocked)
+				}
+				if scenario == "recover" {
+					// The HTTP fixture also requires blocklist, client removal, and skip-redownload flags.
+					if !slices.Equal(f.mutations, []string{"DELETE /api/v3/queue/7", "POST /api/v3/command"}) || len(f.commands) != 1 {
+						t.Fatalf("wrong recovery actions: %v %v", f.mutations, f.commands)
+					}
+					command := f.commands[0]
+					if test.kind == "sonarr" {
+						if command.Name != "EpisodeSearch" || !slices.Equal(command.EpisodeIDs, []int{10}) || len(command.MovieIDs) != 0 {
+							t.Fatalf("wrong episode search: %v", command)
+						}
+					} else if command.Name != "MoviesSearch" || !slices.Equal(command.MovieIDs, []int{3}) || len(command.EpisodeIDs) != 0 {
+						t.Fatalf("wrong movie search: %v", command)
+					}
+					if len(f.service.state.Pending()) != 0 {
+						t.Fatal("completed recovery left an operation pending")
+					}
+				} else {
+					if len(f.mutations)+len(f.service.state.state.Attempts)+len(f.service.state.Pending()) != 0 {
+						t.Fatal("dry run or refused preflight mutated Arr or retry state")
+					}
+					if _, err := os.Stat(f.service.state.path); !errors.Is(err, os.ErrNotExist) {
+						t.Fatal("dry run or refused preflight wrote state")
+					}
+				}
+				if content, err := os.ReadFile(f.file.Path); err != nil || string(content) != "fixture media" {
+					t.Fatal("recovery changed fixture media")
+				}
+			})
 		}
 	}
 }

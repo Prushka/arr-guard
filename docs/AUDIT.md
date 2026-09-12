@@ -420,6 +420,25 @@ mutations, retry-state writes, or media changes**. This was a metadata and sampl
 probe pass, not a new full-library probe pass or production mutation verification.
 No deployment was performed. Detailed local outputs remain untracked in `logs/`.
 
+## Additional waiting-import reasons — September 12
+
+The shared queue classifier now accepts the requested movie/series grab-history
+warnings ending in "release was matched to movie/series by ID", plus
+`Caution: Found executable file`. Matching uses case-insensitive diagnostic prefixes
+in queue titles or messages, including messages with trailing details. This applies
+to queue recovery in both scan and serve modes. Existing completion, identity,
+history, shared-download, and retry checks still apply; defaults are unchanged.
+
+Native tests, race detection, vet, and lint (zero issues) passed. Local HTTP fixtures
+verify all three reasons, scoped episode/movie replacements, removal flags, dry-run
+state preservation, and refusals for missing/conflicting grabbed history. Production
+tests used the independent GET-only transport, disabled redirects, and forced dry
+run: 14 Sonarr plans (three all-existing, 11 searches) and one Radarr search plan,
+with zero preflight refusals across 141 GETs. There were no API mutations, retry-state
+writes, or media changes. These live results cover the current queue; each new
+diagnostic and actual mutation sequence was verified with local fixtures.
+Logs are saved under ignored `logs/import-reasons-*.log`.
+
 ## Initial audit verification
 
 Final native unit/integration tests, the Go race detector, `go vet`, and pinned

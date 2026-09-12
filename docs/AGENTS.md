@@ -168,7 +168,7 @@ servers. These tests made zero API mutations, retry-state writes, or media chang
 This was targeted probe verification, not another full-library probe pass;
 AUDIT.md records the results and the remaining Linux/runtime verification limits.
 
-Partial/waiting-import recovery recognizes the six requested rejection families
+Partial/waiting-import recovery recognizes the rejection reasons listed in README.md
 in completed importPending rows, retains active-import checks, and does not change
 DRY_RUN or RECOVER_BLOCKED_QUEUE defaults. Recovery also runs after each listed
 library in an opted-in one-time subtitle scan. Current queue and grabbed/import
@@ -222,3 +222,13 @@ checked 11,350 accessible files with no size mismatches, both webhook/snapshot
 checks, and 46 queue plans. It made 2,043 GETs and zero API mutations, state writes,
 or media changes. This was metadata/sample-probe verification, not a full-library
 probe pass. The cross-instance sharing limitation above remains unresolved.
+
+The waiting-import allowlist also includes movie/series matched-by-ID grab-history
+warnings and `Caution: Found executable file`. Match these as case-insensitive
+diagnostic prefixes in titles or messages. Warning text does not replace
+authoritative queue/history identity checks or permit active-import removal.
+Both scan and serve use the same classifier and recovery preflights.
+Native tests, race detection, vet, and lint passed. Local fixtures cover the new
+reasons, scoped replacements, dry run, and missing/conflicting history refusals.
+Live queue dry runs planned 15 downloads using 141 GETs with no mutations, state
+writes, or media changes; actual removal/search behavior was tested only locally.

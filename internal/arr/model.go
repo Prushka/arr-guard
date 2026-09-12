@@ -104,6 +104,9 @@ func containsRecoverableImportText(value string) bool {
 		"not a quality revision upgrade for existing movie",
 		"unable to parse file",
 		"unable to determine if file is a sample",
+		"found matching movie via grab history, but release was matched to movie by id",
+		"found matching series via grab history, but release was matched to series by id",
+		"caution: found executable file",
 	} {
 		if strings.HasPrefix(value, prefix) {
 			return true
