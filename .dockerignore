@@ -1,9 +1,15 @@
 .git
 .gitignore
 .env
+.env.*
 .idea
+bin
+logs
+docs
+AGENTS.md
 arr-guard
 *.exe
+*.test
 state.json
 invalid.json
 unmatched.json

@@ -1,9 +1,23 @@
+# Credentials and editor metadata
+.env
+.env.*
+!.env.example
+.idea/
+
+# Build output
+/bin/
 /arr-guard
-/*.exe
+*.exe
+*.test
+
+# Local runtime state and reports
 /state.json
 /unmatched.json
 /state.json.lock
-/audit-*.log
+
+# Logs and verification artifacts (including legacy root locations)
+/logs/*
+!/logs/.gitkeep
+*.log
 /audit-coverage*
-.env
-.idea
+coverage.out

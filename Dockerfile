@@ -16,7 +16,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -trimpath \
     -ldflags="-s -w" \
-    -o /out/arr-guard .
+    -o /out/arr-guard ./cmd/arr-guard
 
 FROM debian:bookworm-slim
 

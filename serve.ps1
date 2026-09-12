@@ -47,7 +47,10 @@ if ($DryRun) {
 
 Push-Location -LiteralPath $projectDirectory
 try {
-    & go run .
+    $logDirectory = Join-Path $projectDirectory 'logs'
+    [IO.Directory]::CreateDirectory($logDirectory) | Out-Null
+    $logPath = Join-Path $logDirectory ('arr-guard-{0}.log' -f (Get-Date -Format 'yyyy-MM-dd'))
+    & go run ./cmd/arr-guard 2>&1 | Tee-Object -FilePath $logPath -Append
     if ($LASTEXITCODE -ne 0) {
         throw "arr-guard exited with code $LASTEXITCODE"
     }
