@@ -6,6 +6,37 @@ write, deletion, move, or rename is used for verification. `.env` is read privat
 by an opt-in test harness; it is not changed. Mutation scenarios use local HTTP
 fixtures and temporary test media.
 
+## GitHub CI/CD follow-up — September 13
+
+Added `.github/workflows/docker.yml` for branch pushes, pull requests, and manual
+runs. Go formatting/race/vet/lint and workflow checks precede the existing
+linux/amd64 Docker build. The image is smoke-tested with no network, no media or
+configuration mounts, a read-only filesystem, and the expected non-root UID before
+publishing that same image. Pull requests cannot publish; missing Docker Hub
+secrets skip publishing without disabling builds. Actions are pinned to verified
+release commits and the GitHub token is restricted to read-only repository access.
+
+Each eligible push publishes its seven-character commit tag. A separate serialized
+job promotes the digest to `latest` only while its commit remains the default-branch
+head, preventing a slower stale build from overwriting a newer promotion. CI never
+receives Arr secrets or live-test opt-ins. `.github` is excluded from the Docker
+build context; `.env` and private artifact exclusions remain intact. `docs/CI.md`
+documents the two required repository secrets and first-run instructions.
+
+Local Go formatting, uncached full race tests, vet, and pinned lint passed. Lint
+reported zero issues. Actionlint v1.7.12 with ShellCheck v0.11.0 and ten inline Bash
+syntax checks passed. Extracted workflow scripts passed mocked tests for all four
+credential-presence combinations, successful commit publishing, smoke/push failures,
+invalid image digests, successful current-head promotion, stale-head refusal, and
+failed GitHub reads. These tests used fake credentials and no registry writes.
+Validation tools/scripts/output are isolated under ignored `bin/` and `logs/`.
+
+Docker is unavailable on this host, so actual image build/execution, Linux CI
+execution, GitHub scheduling, and Docker Hub publishing remain unverified locally.
+The workflow performs its build and container smoke tests on GitHub even before
+secrets are added. No production Arr request, configuration/media change, image
+push, or deployment was performed for this follow-up.
+
 ## Imported-file attempt limit correction — September 12
 
 The imported-file budget now gates the complete remediation sequence. Once any

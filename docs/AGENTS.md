@@ -76,6 +76,18 @@ checks must remain compatible when changing package boundaries.
 
 ## Verification
 
+GitHub CI/CD lives in `.github/workflows/docker.yml`. Branch pushes, pull requests,
+and manual runs execute local-fixture Go/race/vet/lint checks before a linux/amd64
+image build and network-disabled container smoke tests. Never give CI Arr secrets
+or enable live test opt-ins. Docker Hub login/push is conditional on both repository
+secrets and never runs for pull requests. Missing credentials must leave builds
+testable. Publish the smoke-tested image with a seven-character commit tag to
+`meinya/arr-guard`; serialize only `latest` promotion and recheck the default branch
+head before promoting its digest. Keep Actions pinned to verified release commits.
+Validate workflow changes with actionlint and test publishing conditions without
+real credentials or registry writes. Workflow edits do not deploy running services.
+See [CI.md](CI.md) for secret setup, tagging, and local verification limits.
+
 Run `go test ./...`, `go test -race ./...`, `go vet ./...`, and `./lint.ps1` after
 safety-related changes. Use fault injection, stale snapshots, duplicate deliveries,
 concurrency, restart, and cancellation tests where those behaviors change. Live

@@ -71,6 +71,12 @@ engine instead. Set `IMAGE` only when publishing a different registry image:
 IMAGE=registry.example.com/media/arr-guard PUSH=true ./build.sh
 ```
 
+GitHub Actions also tests and builds the image on every branch push and pull
+request. With `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets, branch
+pushes publish the tested commit tag; the current default-branch commit can also
+update `latest`. Builds still run while those secrets are missing. See
+[GitHub image builds and secret setup](CI.md) for the workflow and validation limits.
+
 The Compose deployment reads Arr credentials from `.env`, mounts
 `MEDIA_ROOT` (default `/srv/media`) at `/media`, and uses an identity
 `PATH_MAPPINGS_JSON` because Arr and the sidecar share that container path.
