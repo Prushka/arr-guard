@@ -6,6 +6,32 @@ write, deletion, move, or rename is used for verification. `.env` is read privat
 by an opt-in test harness; it is not changed. Mutation scenarios use local HTTP
 fixtures and temporary test media.
 
+## Custom Format waiting-import recovery — September 14
+
+Added the episode-file and movie-file `Not a Custom Format upgrade` rejection
+families to completed waiting-import recovery. Verified the exact wording and
+appended score details against the upstream
+[Sonarr upgrade specification](https://github.com/Sonarr/Sonarr/blob/develop/src/NzbDrone.Core/MediaFiles/EpisodeImport/Specifications/UpgradeSpecification.cs)
+and [Radarr upgrade specification](https://github.com/Radarr/Radarr/blob/develop/src/NzbDrone.Core/MediaFiles/MovieImport/Specifications/UpgradeSpecification.cs).
+Both scan and serve use this classifier. Ordinary queue recovery preserves
+existing library files, removes/blocklists rejected client downloads, and searches
+only missing targets within the existing budget. These rejections do not qualify
+for the exhausted matched-by-ID manual-import fallback. No new configuration or
+default changes were introduced.
+
+Native tests, race detection, vet, and lint (zero issues) passed. Local fixtures
+cover title/message placement, case and score suffixes, active-state refusal,
+blocklist/client-removal flags, scoped searches, missing/conflicting history,
+dry-run state preservation, and exhausted versus already-present targets. Mixed
+matched-by-ID/Custom Format rejections remain ineligible for final import.
+
+The live GET-only queue dry run used **20 GETs** and planned two Sonarr downloads:
+one missing-target search and one all-existing cleanup. No Radarr queue items
+qualified at that snapshot. Tests used empty in-memory retry state; production
+counter eligibility and actual mutation behavior were not exercised. No production
+API mutations, state/configuration writes, or media changes occurred. Logs are in
+ignored `logs/custom-format-*.log`.
+
 ## GitHub CI/CD follow-up — September 13
 
 Added `.github/workflows/docker.yml` for branch pushes, pull requests, and manual

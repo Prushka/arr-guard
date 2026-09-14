@@ -20,9 +20,11 @@ func TestMatchedIDImportReasonRequiresExactFamily(t *testing.T) {
 		if !q.AllowsMatchedIDImport(kind) {
 			t.Fatal("supported warning not recognized")
 		}
-		q.StatusMessages[0].Messages = append(q.StatusMessages[0].Messages, "Unable to parse file")
-		if q.AllowsMatchedIDImport(kind) {
-			t.Fatal("mixed warning was allowed")
+		for _, additional := range []string{"Unable to parse file", "Not a Custom Format upgrade for existing episode file(s)", "Not a Custom Format upgrade for existing movie file(s)"} {
+			q.StatusMessages[0].Messages = []string{reason, additional}
+			if q.AllowsMatchedIDImport(kind) {
+				t.Fatalf("mixed warning was allowed: %s", additional)
+			}
 		}
 		q.StatusMessages = []QueueStatusMessage{{Title: reason + "entification"}}
 		if q.AllowsMatchedIDImport(kind) {

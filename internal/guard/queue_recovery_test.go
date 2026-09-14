@@ -32,6 +32,10 @@ func TestQueueWaitingImportReasons(t *testing.T) {
 		"Not an upgrade for existing episode file(s)",
 		"No files found are eligible for import in fixture",
 		"Not a quality revision upgrade for existing episode file(s)",
+		"Not a Custom Format upgrade for existing episode file(s)",
+		"Not a Custom Format upgrade for existing movie file(s)",
+		"Not a Custom Format upgrade for existing episode file(s). New: [HD] (10) do not improve on Existing: [HD, English] (20)",
+		"Not a Custom Format upgrade for existing movie file(s). New: [HD] (10) do not improve on Existing: [HD, English] (20)",
 		"Unable to parse file",
 		"BDRip-1080p was unexpected considering the release was grabbed as HDTV-1080p",
 		"Unable to determine if file is a sample",
@@ -66,6 +70,8 @@ func TestQueueWaitingImportReasons(t *testing.T) {
 		"Found matching movie via grab history",
 		"Found matching series via grab history",
 		"Some file named Caution: Found executable file.mkv",
+		"Some file named Not a Custom Format upgrade for existing movie file(s).mkv",
+		"Not a Custom Format upgrade",
 	} {
 		if pendingQueueItem(7, 10, "pack", reason).NeedsImportRecovery() {
 			t.Errorf("unknown reason accepted: %s", reason)
@@ -73,12 +79,14 @@ func TestQueueWaitingImportReasons(t *testing.T) {
 	}
 }
 
-func TestQueueHistoryIDAndExecutableRecovery(t *testing.T) {
+func TestQueueAdditionalWaitingImportRecovery(t *testing.T) {
 	for _, test := range []struct{ name, kind, reason string }{
 		{"movieID", "radarr", "Found matching movie via grab history, but release was matched to movie by ID"},
 		{"seriesID", "sonarr", "Found matching series via grab history, but release was matched to series by ID"},
 		{"movieExecutable", "radarr", "Caution: Found executable file"},
 		{"seriesExecutable", "sonarr", "Caution: Found executable file"},
+		{"movieCustomFormat", "radarr", "Not a Custom Format upgrade for existing movie file(s). New: [HD] (10) do not improve on Existing: [HD, English] (20)"},
+		{"seriesCustomFormat", "sonarr", "Not a Custom Format upgrade for existing episode file(s)"},
 	} {
 		for _, scenario := range []string{"recover", "dryRun", "missingHistory", "conflictingHistory"} {
 			t.Run(test.name+"/"+scenario, func(t *testing.T) {
@@ -121,6 +129,39 @@ func TestQueueHistoryIDAndExecutableRecovery(t *testing.T) {
 				}
 				if content, err := os.ReadFile(f.file.Path); err != nil || string(content) != "fixture media" {
 					t.Fatal("recovery changed fixture media")
+				}
+			})
+		}
+	}
+}
+
+func TestQueueCustomFormatRecoveryAtLimit(t *testing.T) {
+	for _, kind := range []string{"sonarr", "radarr"} {
+		for _, missing := range []bool{false, true} {
+			scenario := "existing"
+			if missing {
+				scenario = "missing"
+			}
+			t.Run(kind+"/"+scenario, func(t *testing.T) {
+				f := newSafetyFixture(t, kind)
+				f.deleted = missing
+				entity := "movie"
+				if kind == "sonarr" {
+					entity = "episode"
+				}
+				f.queue = []arr.QueueRecord{pendingQueueItem(7, 10, "pack", "Not a Custom Format upgrade for existing "+entity+" file(s)")}
+				key := retryKeys(kind, f.file, []int{10})[0]
+				f.service.state.state.Attempts[key] = f.service.config.MaxAttempts
+				err := f.service.recoverBlockedQueue(t.Context(), f.client)
+				if missing {
+					if err == nil || !strings.Contains(err.Error(), "retry limit reached") || len(f.mutations) != 0 {
+						t.Fatalf("exhausted missing target was not protected: err=%v mutations=%v", err, f.mutations)
+					}
+				} else if err != nil || !slices.Equal(f.mutations, []string{"DELETE /api/v3/queue/7"}) {
+					t.Fatalf("existing target cleanup failed: err=%v mutations=%v", err, f.mutations)
+				}
+				if len(f.commands) != 0 || len(f.service.state.Pending()) != 0 || f.service.state.Attempts(key) != f.service.config.MaxAttempts || f.deleted != missing {
+					t.Fatal("custom format recovery changed library state, retry budget, or submitted a command")
 				}
 			})
 		}

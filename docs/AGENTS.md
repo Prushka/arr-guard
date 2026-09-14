@@ -274,7 +274,11 @@ or media changes. This was metadata/sample-probe verification, not a full-librar
 probe pass. The cross-instance sharing limitation above remains unresolved.
 
 The waiting-import allowlist also includes movie/series matched-by-ID grab-history
-warnings and `Caution: Found executable file`. Match these as case-insensitive
+warnings, `Caution: Found executable file`, and `Not a Custom Format upgrade for
+existing episode file(s)` / `existing movie file(s)` (including appended scores).
+Custom-format rejections use ordinary queue recovery, never the exhausted
+matched-by-ID manual-import fallback. Preserve existing library files and search
+only missing targets within their retry budget. Match these as case-insensitive
 diagnostic prefixes in titles or messages. Warning text does not replace
 authoritative queue/history identity checks or permit active-import removal.
 Both scan and serve use the same classifier and recovery preflights.
@@ -322,3 +326,11 @@ Live checks used 125 GETs with zero production mutations or state/media writes;
 cap scenarios used explicitly simulated rejection/counters with real ownership
 and snapshots. Existing real probe outcomes and queue plans remained unchanged.
 Do not describe the limit as guarding only Guard's own search command.
+
+The Custom Format waiting-import addition passed native tests, race detection,
+vet, and lint (zero issues). Local fixtures cover recovery, existing-media cleanup,
+retry exhaustion, active states, history refusals, dry run, and rejection of mixed
+warnings for final import. Live queue dry runs made 20 GETs, planning two Sonarr
+downloads (one search, one existing-only cleanup); no Radarr items qualified.
+Production mutations and state/media writes remained disabled. See AUDIT.md for
+the upstream wording references and verification limits.

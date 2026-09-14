@@ -125,6 +125,8 @@ Completed `importBlocked` downloads remain eligible. Completed `importPending`
 - Not an upgrade for an existing episode/movie.
 - No files found are eligible for import.
 - Not a quality revision upgrade for an existing episode/movie.
+- Not a Custom Format upgrade for existing episode file(s) / movie file(s),
+  including appended format names and scores.
 - Unable to parse file.
 - A quality, season, or episode "was unexpected considering the" release/folder.
 - Unable to determine if file is a sample.

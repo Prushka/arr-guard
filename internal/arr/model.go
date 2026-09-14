@@ -113,6 +113,8 @@ func containsRecoverableImportText(value string) bool {
 		"no files found are eligible for import",
 		"not a quality revision upgrade for existing episode",
 		"not a quality revision upgrade for existing movie",
+		"not a custom format upgrade for existing episode file(s)",
+		"not a custom format upgrade for existing movie file(s)",
 		"unable to parse file",
 		"unable to determine if file is a sample",
 		"found matching movie via grab history, but release was matched to movie by id",
